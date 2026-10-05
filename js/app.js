@@ -238,7 +238,7 @@ function renderShell() {
         COUNTRIES.length > 1 ? h('button', { class: 'country-btn', title: `Country: ${countryName(state.country)}`, onclick: chooseCountry },
           icon('globe'), state.country, icon('chevronDown', 'chev')) : null,
         h('button', { class: 'avatar-btn', title: svc.user.name, onclick: openUserMenu }, initials))),
-    demo ? h('div', { class: 'demo-banner' }, 'Demo mode — sample data, stored only in this browser') : null,
+    ...(demo ? [h('div', { class: 'demo-banner' }, 'Demo mode — sample data, stored only in this browser')] : []),
     h('main', { class: 'view', id: 'view' }));
   renderView();
 }
