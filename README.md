@@ -1,125 +1,128 @@
-# Benbau DK PPE Tracker
+# Benbau PPE Tracker
 
-Web app for PPE stock per location, handouts to workers (with signature and email receipt) and
-transfers between locations. Works on phone and desktop. Data lives in SharePoint lists, and
-users sign in with their Microsoft 365 work account.
+Web app for PPE stock per location, handouts to workers (with signature and receipt) and
+transfers between locations, for Denmark and Sweden. Works on phone and desktop.
 
-It is plain HTML/CSS/JavaScript: no build step, no server, nothing to install.
+- **Hosting:** GitHub Pages (static files, no build step)
+- **Database & logins:** Supabase (free tier). You create the user accounts yourself.
 
 ```
-index.html        page shell
-config.js         <- your settings (client ID, tenant ID, SharePoint site)
-css/app.css       styling
-js/app.js         screens and UI logic
-js/service.js     stock / handout / transfer rules
-js/db-sharepoint.js  SharePoint (Microsoft Graph) storage
-js/db-demo.js     demo storage (browser only)
-js/schema.js      SharePoint list + column definitions, handout reasons
-serve.ps1         local test server
+index.html            page shell
+config.js             <- your settings (Supabase URL + key, countries)
+supabase/setup.sql    database setup: paste into the Supabase SQL editor
+css/app.css           styling
+js/app.js             screens and UI logic
+js/service.js         app logic
+js/db-supabase.js     Supabase storage
+js/db-demo.js         demo storage (browser only)
+js/receipt.js         receipt preview / text / image
+js/schema.js          handout reasons
+serve.ps1             local test server
 ```
 
-## 1. Try it locally (demo mode)
+## 1. Create the Supabase project (once)
 
-While `clientId` in `config.js` is empty, the app runs in **demo mode** with sample data kept only
-in your browser.
+1. Sign up at https://supabase.com (free) and click **New project**.
+   - Name: `benbau-ppe`
+   - Database password: generate one and store it safely. The app doesn't need it.
+   - Region: **Europe (Frankfurt or Stockholm)**, so the data stays in the EU.
+2. When the project is ready, open **SQL Editor → New query**, paste the whole contents of
+   `supabase/setup.sql`, and click **Run**. This creates the tables, the security rules and the starter
+   locations (CPH, FRD2A, Ersbo, Kungsgarden, Stackbo).
+3. **Authentication → Sign In / Providers**:
+   - turn **off** "Allow new users to sign up"
+   - keep **Email** enabled; you can turn off "Confirm email", since you create the users yourself.
+4. **Authentication → URL Configuration**: set **Site URL** to `https://baetup.github.io/benbau-ppe/`
+   and add the same address under **Redirect URLs**. This is needed for "Forgot password?" emails.
+5. **Project Settings → API Keys**: copy the **publishable key** (or the legacy **anon public** key).
+   Then find the **Project URL** (Project Settings → Data API, or the **Connect** button), and put both into `config.js`:
+
+   ```js
+   supabaseUrl: "https://abcdefgh.supabase.co",
+   supabaseKey: "sb_publishable_…",
+   ```
+
+   Never use the **secret** / **service_role** key in the app.
+
+## 2. Add a user (each time someone needs access)
+
+Two steps in the Supabase dashboard:
+
+1. **Authentication → Users → Add user → Create new user**: enter their email and a starting password
+   and tick **Auto Confirm User**.
+2. **Table Editor → staff → Insert row**: the same **email** plus their **name**. The name appears as
+   "Handed out by" on handouts and receipts.
+
+Give the person the app address, their email and the starting password. They can change the password
+in the app (menu → **Change password**) or with **Forgot password?** on the login screen.
+
+**To remove access:** delete the person's row in `staff`. They are locked out of all data immediately.
+You can also delete the user under Authentication → Users.
+
+## 3. Publish the app on GitHub Pages
+
+In the `benbau-ppe` repository on GitHub, upload the files from this folder, keeping the folders
+(`css`, `js`, `img`, `supabase`). The easiest way is to drag the folders onto **Add file → Upload files**.
+Pages is already switched on, so the app updates at https://baetup.github.io/benbau-ppe/ a minute later.
+
+Delete these old files from the repository if they are still there: `js/auth.js`, `js/graph.js`,
+`js/db-sharepoint.js`.
+
+While `supabaseUrl` and `supabaseKey` are empty, the app runs in **demo mode** with sample data kept
+only in the browser. Add `?demo` to the address to see demo mode later on.
+
+### Put it on the phone home screen
+Open the address on the phone. On iPhone: Share → **Add to Home Screen**. On Android: menu →
+**Add to Home screen** / **Install app**.
+
+## How it works
+
+### Security
+- The publishable key in `config.js` is meant to be public. It only lets the app talk to the database;
+  what anyone can read or change is decided by the database's security rules (row level security).
+- Only signed-in users whose email is in the `staff` table can see or change any data.
+  Everyone else, including someone who has the key, gets nothing.
+- Handouts, transfers and stock changes run as database functions. Each one completes fully or not at
+  all, so two people can't both take the last item, and a failed handout never leaves stock half-changed.
+- "Handed out by" is filled in by the database from the signed-in user, so it can't be faked.
+
+### Countries
+- The countries are listed in `config.js` (`countries`). Each location belongs to one
+  (**Menu → Manage locations**).
+- The **DK / SE** button in the header switches country. Each phone or PC remembers its choice.
+  The location list and the personnel list then show only that country. A person belongs to the
+  country of their site; people without a site show in every country.
+- Products are shared. Stock is kept per location. Transfers can go to any location.
+
+### Receipts
+The ✉ button on a handout, and the "Send receipt" option when saving a handout, open a receipt with:
+- **Open email with receipt**: opens the phone's or PC's email app with the address, subject and
+  receipt text filled in.
+- **Share / Download receipt image**: a PNG of the receipt **including the signature**. On a phone,
+  Share lets you pick the mail app and attach it directly. On a PC it downloads, and you attach it.
+
+Email apps can't attach files automatically from a link. If you later want fully automatic emails,
+that can be added with a free email service (e.g. Resend) and a Supabase Edge Function.
+
+### Data & backups
+- View and export the data in Supabase **Table Editor** (each table has **Export to CSV**).
+- The free plan has no automatic backups. Export the tables to CSV now and then (e.g. monthly),
+  or upgrade to the Pro plan for daily backups.
+- A free project is paused after 7 days without any use. Daily use keeps it active. If it does pause,
+  click **Restore** in the Supabase dashboard.
+- **GDPR:** the app stores worker names, contact details and signatures. Accept Supabase's
+  Data Processing Agreement (dashboard → Organization → Legal documents) and keep the project in an EU region.
+
+## Testing locally
 
 ```bash
 powershell -ExecutionPolicy Bypass -File serve.ps1
 ```
 
-Then open http://localhost:5500/. To try it on a phone, use the hosted version (step 5).
+Then open http://localhost:5500/. To use the real database locally, also add `http://localhost:5500/`
+to the Supabase Redirect URLs.
 
-## 2. Create the SharePoint site
-
-1. In SharePoint, create a site (for example a Team site called **PPE**), e.g.
-   `https://benbau.sharepoint.com/sites/PPE`.
-2. Add everyone who will use the app as **Members** (Edit permission). Those people can use the
-   app; nobody else can see the data.
-
-You don't create the lists yourself. The first time you sign in, the app offers to create them:
-
-| List | Holds |
-|---|---|
-| PPE_Locations | Sites/stores (CPH, FRD2A, …) |
-| PPE_Products | Products, brand, sizes, image URL |
-| PPE_Stock | Quantity per product + size + location |
-| PPE_Personnel | Workers (name, email, company, site, active) |
-| PPE_Handouts | Every handout incl. reason, notes, date, who handed out, signature |
-| PPE_Transfers | Moves between locations |
-
-## 3. Register the app in Microsoft Entra ID
-
-You may be able to do this yourself: by default every user can register apps. If the menu is
-missing or you get "access denied", send the text in section 6 to IT.
-
-1. Go to https://entra.microsoft.com → **Applications → App registrations → New registration**.
-2. Name: `Benbau PPE Tracker`. Supported account types: **Accounts in this organizational directory only**.
-3. Redirect URI: choose platform **Single-page application (SPA)** and enter `http://localhost:5500/`.
-   Then **Register**.
-4. On **Authentication**, add your hosted address as another SPA redirect URI (step 5), e.g.
-   `https://YOURNAME.github.io/benbau-ppe/`. It must match exactly, including the trailing `/`.
-5. On **API permissions → Add a permission → Microsoft Graph → Delegated permissions**, add:
-   `User.Read`, `Sites.ReadWrite.All`, `Mail.Send`, `Sites.Manage.All`.
-   Then click **Grant admin consent** (needs an admin). If you skip it, each user is asked to
-   accept the permissions the first time, unless your tenant blocks that.
-6. From **Overview**, copy the **Application (client) ID** and **Directory (tenant) ID** into `config.js`,
-   together with your `siteUrl`.
-
-"Delegated" means the app only ever acts as the signed-in person, with that person's own
-SharePoint permissions. Receipts are sent from the mailbox of the person who clicks the button.
-
-## 4. First sign-in
-
-Open the app, sign in, and click **Create lists**. Then open the menu (your initials, top right) →
-**Manage locations** to add your locations, and add products with **+** on the Inventory tab.
-Register stock with the product's **Edit** button.
-
-## 5. Hosting
-
-The app is static files, so any static host works. The app code is not secret: `config.js`
-only has public IDs, and all data is behind Microsoft sign-in.
-
-### Option A: GitHub Pages (simplest, free)
-1. Create a GitHub account and a new repository, e.g. `benbau-ppe`. Free GitHub Pages needs a
-   **public** repository; private repos need a paid plan.
-2. Upload all files in this folder (**Add file → Upload files**, drag the folder contents in, commit).
-   No git installation is needed.
-3. **Settings → Pages → Source: Deploy from a branch → main / (root) → Save**.
-4. After a minute the app is live at `https://YOURNAME.github.io/benbau-ppe/`. Add that exact
-   address as a SPA redirect URI in Entra (step 3.4).
-5. To update the app later, upload the changed files again.
-
-### Option B: Azure Static Web Apps (free tier, can use a private repo)
-Microsoft-hosted, can deploy from a **private** GitHub repo, and supports a custom domain such as
-`ppe.benbau.dk`. In the Azure portal, create a **Static Web App** (Free plan), connect it to your
-GitHub repo, and set build preset **Custom** with app location `/` and no build command. Add the
-resulting `https://….azurestaticapps.net/` address as a redirect URI.
-
-### Option C: Netlify Drop
-Go to https://app.netlify.com/drop and drag this folder onto the page. You get a URL in seconds.
-Add it as a redirect URI.
-
-### Put it on the phone home screen
-Open the hosted URL on the phone. On iPhone: Share → **Add to Home Screen**. On Android: menu →
-**Add to Home screen** / **Install app**. It then opens full-screen like an app.
-
-## 6. Text to send to IT (if needed)
-
-> Hi, I've built a web app for tracking PPE on our construction sites. It stores its data in a
-> SharePoint site and signs users in with their Microsoft 365 accounts. Could you please create an
-> app registration in Entra ID for it:
->
-> - Name: Benbau PPE Tracker, single tenant
-> - Platform: Single-page application, redirect URIs: `http://localhost:5500/` and `<hosted URL>`
-> - Microsoft Graph **delegated** permissions: User.Read, Sites.ReadWrite.All, Sites.Manage.All, Mail.Send,
->   with admin consent granted
->
-> The app only acts as the signed-in user (no application permissions and no client secret). Please send me the
-> Application (client) ID and Directory (tenant) ID. Thanks!
-
-## Notes
-- **Concurrent use:** stock changes use SharePoint version checks, so two people handing out the same item at
-  the same time can't both take the last one.
-- **Deleting a handout** can return the items to stock. Deleted items go to the SharePoint site's recycle bin.
-- **Handout reasons** are in `js/schema.js` (`REASONS`).
-- **Product images** are optional. Paste a public image URL (for example from the supplier's website).
+## Changing things
+- **Handout reasons:** `js/schema.js` (`REASONS`)
+- **Countries / app name:** `config.js`
+- **Product images:** optional. Paste a public image URL in the product's Edit form.

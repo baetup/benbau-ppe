@@ -70,7 +70,6 @@ h1, h2, h3 { margin: 0; line-height: 1.25; }
 .btn-green { background: var(--green); color: #fff; }
 .btn-blue { background: var(--blue); color: #fff; }
 .btn-red { background: var(--red); color: #fff; }
-.btn-ms { border-color: var(--line-2); background: #fff; color: #1f2937; }
 .btn.square { width: 46px; height: 46px; padding: 0; flex: none; }
 .btn-row { display: flex; gap: 10px; justify-content: flex-end; }
 
@@ -219,7 +218,6 @@ select.input {
 .product-card { display: flex; flex-direction: column; gap: 12px; }
 .pc-top { display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: start; }
 .pc-title h3 { font-size: 16px; font-weight: 700; }
-.brand-text { color: var(--brand); font-size: 12px; font-weight: 600; }
 .pc-counts { text-align: right; line-height: 1.1; }
 .count-stock { font-size: 26px; font-weight: 800; color: var(--brand); }
 .count-stock.zero { color: #9CA3AF; }
@@ -316,8 +314,18 @@ select.input {
 .menu-item:hover { background: var(--bg); }
 .menu-item .icon { color: var(--muted); }
 
-.loc-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; }
-.loc-row.new { grid-template-columns: 1fr auto; padding-top: 10px; border-top: 1px dashed var(--line-2); }
+.loc-row { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.loc-row.new { border-bottom: 0; padding-top: 4px; }
+.loc-actions { display: flex; gap: 8px; align-items: center; }
+.loc-actions select { flex: 1; }
+.loc-actions .btn { margin-left: auto; }
+
+.country-btn {
+  display: inline-flex; align-items: center; gap: 4px; height: 38px; padding: 0 10px; flex: none;
+  border: 1px solid var(--line-2); border-radius: 10px; background: #fff; font-weight: 700; font-size: 14px;
+}
+.country-btn .icon { width: 16px; height: 16px; color: var(--brand); }
+.country-btn .chev { color: var(--muted); }
 
 /* ---------- toasts & busy ---------- */
 .toast-host {
@@ -340,7 +348,14 @@ select.input {
 .login-card.left .brand-logo { align-self: flex-start; }
 .login-card h1 { font-size: 21px; }
 .login-card p { margin: 0; }
-.setup-list { margin: 0; padding-left: 20px; }
+.login-form { width: 100%; text-align: left; }
+.login-form .btn[disabled] { opacity: .6; }
+.form-error { margin: 0; color: var(--red); font-size: 14px; }
+.link-btn.center { align-self: center; }
 
-@media (max-width: 480px) { .hide-sm { display: none; } }
+@media (max-width: 480px) {
+  .hide-sm { display: none; }
+  .brand-name { font-size: 16px; }
+  .header-inner { gap: 8px; }
+}
 @media (max-width: 360px) { .hide-xs { display: none; } }

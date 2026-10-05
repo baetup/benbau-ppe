@@ -56,7 +56,7 @@ export function createSignaturePad() {
     empty = true; hint.hidden = false;
   }
 
-  // Small image (white background) so it fits comfortably in a SharePoint text column.
+  // Small image (white background) so the database stays small.
   function toDataURL() {
     const w = 500, hgt = Math.round(500 * (height / width || 0.35));
     const off = document.createElement('canvas');

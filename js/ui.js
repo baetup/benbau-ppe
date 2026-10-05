@@ -156,7 +156,8 @@ export async function busy(label, fn) {
 export function errorMessage(e) {
   if (!e) return 'Something went wrong';
   if (e.status === 401) return 'Your sign-in has expired. Please reload the page.';
-  if (e.status === 403) return 'Access denied. Check that you have edit permission on the SharePoint site. ' + (e.message || '');
+  if (e.status === 403) return 'Access denied. Ask the administrator to add your email to the staff list. ' + (e.message || '');
+  if (e instanceof TypeError && /fetch/i.test(e.message)) return 'No connection to the server. Check your internet connection.';
   return e.message || String(e);
 }
 

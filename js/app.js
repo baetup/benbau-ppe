@@ -1,26 +1,29 @@
 import { h, field, emptyState, openModal, confirmDialog, pickFrom, toast, busy, FAILED, errorMessage, todayISO, dateInputToIso, formatDate } from './ui.js';
-import { icon, microsoftLogo } from './icons.js';
-import { LISTS, REASONS } from './schema.js';
+import { icon } from './icons.js';
+import { REASONS } from './schema.js';
 import { PpeService, parseSizes } from './service.js';
 import { DemoDb } from './db-demo.js';
-import { SharePointDb } from './db-sharepoint.js';
-import { createAuth } from './auth.js';
-import { createGraph } from './graph.js';
+import { SupabaseDb } from './db-supabase.js';
 import { createSignaturePad } from './signature.js';
-import { buildReceiptHtml, receiptSubject } from './receipt.js';
+import { buildReceiptHtml, receiptSubject, receiptText, receiptImage } from './receipt.js';
 
-const cfg = Object.assign({ appName: 'Benbau DK PPE Tracker' }, window.PPE_CONFIG || {});
-const demo = !cfg.clientId || new URLSearchParams(location.search).has('demo');
+const cfg = Object.assign({ appName: 'Benbau PPE Tracker' }, window.PPE_CONFIG || {});
+const demo = !cfg.supabaseUrl || !cfg.supabaseKey || new URLSearchParams(location.search).has('demo');
+const COUNTRIES = (cfg.countries && cfg.countries.length) ? cfg.countries : [{ code: 'DK', name: 'Denmark' }];
+const countryName = code => (COUNTRIES.find(c => c.code === code) || { name: code || '—' }).name;
 const app = document.getElementById('app');
 document.title = cfg.appName;
 
-let svc, auth;
+let svc, sb;
+// Opened from a "reset password" email link?
+let passwordRecovery = /type=recovery/.test(location.hash);
 
 // ---------- UI state (persisted per browser) ----------
-const PREF_KEY = 'ppe-prefs-' + (demo ? 'demo' : cfg.clientId);
+const PREF_KEY = 'ppe-prefs-' + (demo ? 'demo' : 'live');
 const prefs = (() => { try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch { return {}; } })();
 const state = {
   tab: prefs.tab || 'inventory',
+  country: COUNTRIES.some(c => c.code === prefs.country) ? prefs.country : COUNTRIES[0].code,
   locationId: prefs.locationId || null,
   personId: prefs.personId || null,
   cart: prefs.cart || [],             // [{ productId, size, qty }]
@@ -36,7 +39,7 @@ const state = {
 function savePrefs() {
   try {
     localStorage.setItem(PREF_KEY, JSON.stringify({
-      tab: state.tab, locationId: state.locationId, personId: state.personId, cart: state.cart, cartLocationId: state.cartLocationId,
+      tab: state.tab, country: state.country, locationId: state.locationId, personId: state.personId, cart: state.cart, cartLocationId: state.cartLocationId,
     }));
   } catch { /* storage unavailable */ }
 }
@@ -46,25 +49,34 @@ boot();
 
 async function boot() {
   try {
-    let db, user, mailer = null;
+    let db, user;
     if (demo) {
-      db = new DemoDb();
       user = { name: 'Demo User', email: 'demo@example.com' };
+      db = new DemoDb(user);
     } else {
-      if (!window.msal) throw new Error('Could not load the Microsoft sign-in library. Check your internet connection and reload.');
+      if (!window.supabase) throw new Error('Could not load the Supabase library. Check your internet connection and reload.');
+      if (!sb) {
+        sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
+        sb.auth.onAuthStateChange(event => {
+          if (event === 'PASSWORD_RECOVERY') { passwordRecovery = true; renderNewPassword(); }
+          if (event === 'SIGNED_OUT' && svc) location.reload();
+        });
+      }
       renderLoading('Signing in…');
-      auth = await createAuth(cfg);
-      if (!auth.account) return renderLogin();
-      const graph = createGraph(auth.getToken);
-      user = { name: auth.account.name || auth.account.username, email: auth.account.username };
-      db = new SharePointDb(graph, cfg.siteUrl);
-      mailer = body => graph.post('/me/sendMail', body);
-      renderLoading('Connecting to SharePoint…');
-      const missing = await db.connect();
-      if (missing.length) return renderSetup(db, missing);
+      const { data: { session } } = await sb.auth.getSession();
+      if (passwordRecovery && session) return renderNewPassword();
+      if (!session) return renderLogin();
+
+      // Only people listed in the staff table may use the app (the database enforces this too).
+      const { data: staff, error } = await sb.from('staff').select('name, email').maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!staff) return renderNoAccess(session.user.email);
+      user = { name: staff.name, email: session.user.email };
+      db = new SupabaseDb(sb);
     }
     renderLoading('Loading data…');
-    svc = new PpeService(db, user, mailer);
+    svc = new PpeService(db, user);
+    svc.defaultCountry = COUNTRIES[0].code;
     await svc.loadBase();
     startApp();
   } catch (e) {
@@ -77,49 +89,95 @@ function renderLoading(text) {
   app.replaceChildren(h('div', { class: 'center-screen' }, h('div', { class: 'spinner' }), h('p', { class: 'muted' }, text)));
 }
 
-function renderLogin() {
-  app.replaceChildren(h('div', { class: 'center-screen' },
-    h('div', { class: 'card login-card' },
-      h('span', { class: 'brand-logo lg' }, icon('layers')),
-      h('h1', null, cfg.appName),
-      h('p', { class: 'muted' }, 'Sign in with your Microsoft 365 work account.'),
-      h('button', { class: 'btn btn-block btn-ms', onclick: () => auth.login() }, microsoftLogo(), 'Sign in with Microsoft'))));
+function authCard(...children) {
+  app.replaceChildren(h('div', { class: 'center-screen' }, h('div', { class: 'card login-card' }, children)));
 }
 
-function renderSetup(db, missing) {
-  const status = h('p', { class: 'muted small' });
-  app.replaceChildren(h('div', { class: 'center-screen' },
-    h('div', { class: 'card login-card left' },
-      h('span', { class: 'brand-logo lg' }, icon('database')),
-      h('h1', null, 'SharePoint setup'),
-      h('p', null, 'The app stores its data in lists on ', h('b', null, cfg.siteUrl), '. These lists are missing:'),
-      h('ul', { class: 'setup-list' }, missing.map(k => h('li', null, LISTS[k].title))),
-      h('p', { class: 'muted small' }, 'You need Owner or Edit permission on the site. You may be asked to approve the “Manage your sites” permission once.'),
-      h('button', {
-        class: 'btn btn-block btn-brand', onclick: async () => {
-          const r = await busy('Creating lists…', async () => {
-            await auth.getToken(['Sites.Manage.All']);
-            await db.provision(msg => { status.textContent = msg; });
-          });
-          if (r !== FAILED) { toast('SharePoint lists are ready', 'success'); boot(); }
-        }
-      }, icon('check'), 'Create lists'),
-      status,
-      h('button', { class: 'btn btn-block btn-outline', onclick: () => auth.logout() }, icon('logout'), 'Sign out'))));
+function renderLogin() {
+  const email = h('input', { class: 'input', type: 'email', name: 'email', autocomplete: 'username', placeholder: 'Email', required: true });
+  const password = h('input', { class: 'input', type: 'password', name: 'password', autocomplete: 'current-password', placeholder: 'Password', required: true });
+  const message = h('p', { class: 'form-error', hidden: true });
+  const submit = h('button', { class: 'btn btn-block btn-brand', type: 'submit' }, 'Sign in');
+  const showError = text => { message.textContent = text; message.hidden = false; };
+
+  const form = h('form', {
+    class: 'form login-form', onsubmit: async e => {
+      e.preventDefault();
+      message.hidden = true;
+      submit.disabled = true;
+      const { error } = await sb.auth.signInWithPassword({ email: email.value.trim(), password: password.value });
+      submit.disabled = false;
+      if (error) return showError(error.message === 'Invalid login credentials' ? 'Wrong email or password.' : error.message);
+      boot();
+    },
+  }, email, password, message, submit,
+    h('button', {
+      class: 'link-btn center', type: 'button', onclick: async () => {
+        const addr = email.value.trim();
+        if (!addr) return showError('Type your email address first, then click “Forgot password?” again.');
+        const { error } = await sb.auth.resetPasswordForEmail(addr, { redirectTo: location.origin + location.pathname });
+        if (error) return showError(error.message);
+        toast('If the account exists, an email with a reset link is on its way.', 'success', 6000);
+      }
+    }, 'Forgot password?'));
+
+  authCard(
+    h('span', { class: 'brand-logo lg' }, icon('layers')),
+    h('h1', null, cfg.appName),
+    h('p', { class: 'muted' }, 'Sign in with the account you received from your administrator.'),
+    form);
+}
+
+function renderNewPassword() {
+  const pw1 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: 'New password', required: true });
+  const pw2 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: 'Repeat new password', required: true });
+  authCard(
+    h('span', { class: 'brand-logo lg' }, icon('layers')),
+    h('h1', null, 'Choose a new password'),
+    h('form', {
+      class: 'form login-form', onsubmit: async e => {
+        e.preventDefault();
+        if (!(await changePassword(pw1.value, pw2.value))) return;
+        passwordRecovery = false;
+        history.replaceState(null, '', location.pathname);
+        boot();
+      },
+    }, pw1, pw2, h('button', { class: 'btn btn-block btn-brand', type: 'submit' }, 'Save password')));
+}
+
+async function changePassword(pw1, pw2) {
+  if (pw1.length < 8) { toast('Use at least 8 characters', 'error'); return false; }
+  if (pw1 !== pw2) { toast('The two passwords are not the same', 'error'); return false; }
+  const r = await busy('Saving…', async () => {
+    const { error } = await sb.auth.updateUser({ password: pw1 });
+    if (error) throw new Error(error.message);
+  });
+  if (r === FAILED) return false;
+  toast('Password changed', 'success');
+  return true;
+}
+
+function renderNoAccess(email) {
+  authCard(
+    h('span', { class: 'brand-logo lg danger' }, icon('alert')),
+    h('h1', null, 'No access yet'),
+    h('p', null, `You are signed in as ${email}, but this account has not been added to the staff list. Ask the administrator to add you.`),
+    h('button', { class: 'btn btn-block btn-outline', onclick: signOut }, icon('logout'), 'Sign out'));
+}
+
+async function signOut() {
+  svc = null;
+  await sb.auth.signOut();
+  location.reload();
 }
 
 function renderFatal(e) {
-  let hint = '';
-  if (e.status === 404) hint = 'The SharePoint site was not found. Check siteUrl in config.js.';
-  else if (e.status === 403) hint = 'You do not have access to the SharePoint site. Ask the site owner to add you as a member.';
-  app.replaceChildren(h('div', { class: 'center-screen' },
-    h('div', { class: 'card login-card left' },
-      h('span', { class: 'brand-logo lg danger' }, icon('alert')),
-      h('h1', null, 'Something went wrong'),
-      h('p', null, errorMessage(e)),
-      hint ? h('p', { class: 'muted' }, hint) : null,
-      h('button', { class: 'btn btn-block btn-brand', onclick: () => location.reload() }, icon('refresh'), 'Try again'),
-      auth && auth.account ? h('button', { class: 'btn btn-block btn-outline', onclick: () => auth.logout() }, icon('logout'), 'Sign out') : null)));
+  authCard(
+    h('span', { class: 'brand-logo lg danger' }, icon('alert')),
+    h('h1', null, 'Something went wrong'),
+    h('p', null, errorMessage(e)),
+    h('button', { class: 'btn btn-block btn-brand', onclick: () => location.reload() }, icon('refresh'), 'Try again'),
+    sb ? h('button', { class: 'btn btn-block btn-outline', onclick: signOut }, icon('logout'), 'Sign out') : null);
 }
 
 function startApp() {
@@ -128,15 +186,43 @@ function startApp() {
   state.cart = state.cart.filter(c => svc.product(c.productId));
   savePrefs();
   renderShell();
-  if (!svc.activeLocations().length) {
+  if (!svc.locationsIn(state.country).length) {
     toast('Add your first location to get started');
     openLocations();
   }
 }
 
 function ensureLocation() {
-  const active = svc.activeLocations();
+  const active = svc.locationsIn(state.country);
   if (!active.some(l => l.id === state.locationId)) state.locationId = active.length ? active[0].id : null;
+}
+
+const inCountry = p => { const c = svc.personCountry(p); return !c || c === state.country; };
+
+// <option>s for a location <select>, grouped by country when there is more than one.
+function locationOptions(locs) {
+  if (COUNTRIES.length < 2) return locs.map(l => h('option', { value: String(l.id) }, l.Title));
+  return COUNTRIES
+    .map(c => [c, locs.filter(l => svc.countryOf(l) === c.code)])
+    .filter(([, ls]) => ls.length)
+    .map(([c, ls]) => h('optgroup', { label: c.name }, ls.map(l => h('option', { value: String(l.id) }, l.Title))));
+}
+
+async function chooseCountry() {
+  const code = await pickFrom({
+    title: 'Country', iconName: 'globe', selectedId: state.country, placeholder: 'Search…',
+    items: COUNTRIES.map(c => ({ id: c.code, label: c.name, sub: svc.locationsIn(c.code).map(l => l.Title).join(', ') || 'No locations yet' })),
+  });
+  if (!code || code === state.country) return;
+  if (state.cart.length && !(await confirmDialog(`Your cart has items from ${svc.locName(state.cartLocationId)}. Switching country will empty the cart.`, { okText: 'Switch country' }))) return;
+  state.country = code;
+  state.cart = [];
+  ensureLocation();
+  state.cartLocationId = state.locationId;
+  const person = svc.person(state.personId);
+  if (person && !inCountry(person)) state.personId = null;
+  savePrefs();
+  renderShell();
 }
 
 // ---------- shell ----------
@@ -149,6 +235,8 @@ function renderShell() {
         h('nav', { class: 'tabs' },
           tabButton('inventory', 'Inventory', 'package'),
           tabButton('personnel', 'Personnel', 'users')),
+        COUNTRIES.length > 1 ? h('button', { class: 'country-btn', title: `Country: ${countryName(state.country)}`, onclick: chooseCountry },
+          icon('globe'), state.country, icon('chevronDown', 'chev')) : null,
         h('button', { class: 'avatar-btn', title: svc.user.name, onclick: openUserMenu }, initials))),
     demo ? h('div', { class: 'demo-banner' }, 'Demo mode — sample data, stored only in this browser') : null,
     h('main', { class: 'view', id: 'view' }));
@@ -181,17 +269,24 @@ function openUserMenu() {
       h('div', { class: 'muted small pad-b' }, svc.user.email),
       item('pin', 'Manage locations', openLocations),
       item('refresh', 'Refresh data', refreshAll),
-      !demo ? item('database', 'Check SharePoint lists', async () => {
-        const r = await busy('Checking lists…', async () => { await auth.getToken(['Sites.Manage.All']); await svc.db.provision(); });
-        if (r !== FAILED) toast('All lists and columns are in place', 'success');
-      }) : null,
+      !demo ? item('edit', 'Change password', openChangePassword) : null,
       demo ? item('refresh', 'Reset demo data', async () => {
         if (!(await confirmDialog('Delete all demo changes and restore the sample data?', { okText: 'Reset', danger: true }))) return;
         svc.db.reset();
         await refreshAll();
       }) : null,
-      demo && cfg.clientId ? item('logout', 'Leave demo', () => { location.href = location.pathname; }) : null,
-      !demo ? item('logout', 'Sign out', () => auth.logout()) : null),
+      demo && cfg.supabaseUrl ? item('logout', 'Leave demo', () => { location.href = location.pathname; }) : null,
+      !demo ? item('logout', 'Sign out', signOut) : null),
+  });
+}
+
+function openChangePassword() {
+  const pw1 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password' });
+  const pw2 = h('input', { class: 'input', type: 'password', autocomplete: 'new-password' });
+  const m = openModal({
+    title: 'Change password', iconName: 'edit', iconClass: 'c-brand', size: 'sm', persistent: true,
+    body: h('div', { class: 'form' }, field('New password (min. 8 characters)', pw1), field('Repeat new password', pw2)),
+    footer: h('button', { class: 'btn btn-block btn-brand', onclick: async () => { if (await changePassword(pw1.value, pw2.value)) m.close(); } }, icon('check'), 'Save'),
   });
 }
 
@@ -205,11 +300,11 @@ async function refreshAll() {
 
 // ---------- inventory ----------
 function inventoryView() {
-  const locs = svc.activeLocations();
+  const locs = svc.locationsIn(state.country);
   const locSelect = h('select', {
     class: 'location-native', 'aria-label': 'Location', value: state.locationId == null ? '' : String(state.locationId),
     onchange: e => changeLocation(Number(e.target.value), e.target),
-  }, locs.length ? locs.map(l => h('option', { value: String(l.id) }, l.Title)) : h('option', { value: '' }, 'No locations'));
+  }, locs.length ? locs.map(l => h('option', { value: String(l.id) }, l.Title)) : h('option', { value: '' }, `No locations in ${countryName(state.country)}`));
 
   queueMicrotask(() => {
     updateCartBadge();
@@ -271,7 +366,7 @@ function fillProductList() {
   const list = document.getElementById('product-list');
   if (!list) return;
   const q = state.search.trim().toLowerCase();
-  const prods = svc.activeProducts().filter(p => !q || `${p.Title} ${p.Brand || ''}`.toLowerCase().includes(q));
+  const prods = svc.activeProducts().filter(p => !q || p.Title.toLowerCase().includes(q));
   if (!prods.length) {
     list.replaceChildren(q
       ? emptyState('search', 'No matching products', 'Try another search.')
@@ -312,7 +407,7 @@ function productCard(p) {
   return h('article', { class: 'card product-card', 'data-id': p.id },
     h('div', { class: 'pc-top' },
       thumb(p, 'thumb'),
-      h('div', { class: 'pc-title' }, h('h3', null, p.Title), h('div', { class: 'brand-text' }, p.Brand || '')),
+      h('div', { class: 'pc-title' }, h('h3', null, p.Title)),
       h('div', { class: 'pc-counts' },
         h('div', { class: 'count-stock' + (inStock <= 0 ? ' zero' : '') }, inStock), h('div', { class: 'count-label' }, 'in stock'),
         h('div', { class: 'count-cart' }, inCart), h('div', { class: 'count-label' }, 'in cart'))),
@@ -391,7 +486,6 @@ function openCart() {
         return h('div', { class: 'cart-item' },
           h('div', null,
             h('div', { class: 'ci-name' }, p.Title),
-            h('div', { class: 'brand-text' }, p.Brand || ''),
             h('div', { class: 'ci-meta' }, `Size: ${c.size} · Quantity: ${c.qty}`)),
           h('button', { class: 'icon-btn c-red', 'aria-label': 'Remove', onclick: () => { state.cart.splice(i, 1); afterCartChange(); draw(); } }, icon('trash')));
       })));
@@ -406,7 +500,7 @@ function itemsSummary() {
 }
 
 function choosePerson(selectedId, includeInactive = false) {
-  const people = includeInactive ? svc.personnel : svc.activePersonnel();
+  const people = (includeInactive ? svc.personnel : svc.activePersonnel()).filter(inCountry);
   return pickFrom({
     title: 'Select personnel', iconName: 'users', selectedId,
     placeholder: 'Search by name or company…',
@@ -444,7 +538,7 @@ function openHandout(cartModal) {
     person = p;
     emailRow.hidden = !p.Email;
     emailCb.checked = !!p.Email;
-    emailText.textContent = `Email receipt to ${p.Email || ''}`;
+    emailText.textContent = `Send receipt to ${p.Email || ''} after saving`;
   };
 
   const m = openModal({
@@ -464,7 +558,7 @@ function openHandout(cartModal) {
     if (!person) return toast('Select the person receiving the PPE', 'error');
     if (!date.value) return toast('Choose a date', 'error');
     if (sig.isEmpty()) return toast('The receiver needs to sign', 'error');
-    const sendTo = emailCb.checked ? person.Email : null;
+    const sendReceipt = emailCb.checked;
     const rows = await busy('Saving handout…', () => svc.handout({
       person, locationId: state.locationId, items: state.cart.map(c => ({ ...c })),
       reason: reason.value, notes: notes.value.trim(), date: dateInputToIso(date.value), signature: sig.toDataURL(),
@@ -478,10 +572,7 @@ function openHandout(cartModal) {
     afterCartChange();
     loadStock();
     toast(`Handout to ${person.Title} saved`, 'success');
-    if (sendTo) {
-      const r = await busy('Sending receipt…', () => sendReceipt(rows, person, sendTo));
-      if (r !== FAILED) toast(demo ? 'Demo mode: receipt email not sent' : `Receipt sent to ${sendTo}`, 'success');
-    }
+    if (sendReceipt) openReceipt(rows, person);
   }
 }
 
@@ -489,7 +580,7 @@ function openTransfer(cartModal) {
   const fromId = state.locationId;
   const dests = svc.activeLocations().filter(l => l.id !== fromId);
   if (!dests.length) return toast('Add another location first (menu → Manage locations)', 'error');
-  const dest = h('select', { class: 'input' }, h('option', { value: '' }, 'Choose destination…'), dests.map(l => h('option', { value: String(l.id) }, l.Title)));
+  const dest = h('select', { class: 'input' }, h('option', { value: '' }, 'Choose destination…'), locationOptions(dests));
   const reason = h('textarea', { class: 'input', rows: '5', placeholder: 'Write reason (ex: new workers incoming soon, visitors on site, backup in case of PPE wear…)' });
 
   const m = openModal({
@@ -522,10 +613,9 @@ function openTransfer(cartModal) {
 // ---------- products ----------
 function openProductEditor(product) {
   const isNew = !product;
-  const p = product || { Title: '', Brand: '', Sizes: 'S, M, L, XL, 2XL', ImageUrl: '', Active: true };
+  const p = product || { Title: '', Sizes: 'S, M, L, XL, 2XL', ImageUrl: '', Active: true };
   const locId = state.locationId;
   const name = h('input', { class: 'input', value: p.Title || '' });
-  const brand = h('input', { class: 'input', value: p.Brand || '' });
   const sizes = h('input', { class: 'input', value: p.Sizes || '', placeholder: 'e.g. S, M, L, XL or OneSize' });
   const image = h('input', { class: 'input', type: 'url', value: p.ImageUrl || '', placeholder: 'https://… (optional)' });
   const active = h('input', { type: 'checkbox', checked: p.Active !== false });
@@ -549,7 +639,6 @@ function openProductEditor(product) {
     title: isNew ? 'New product' : 'Edit product', iconName: 'package', iconClass: 'c-brand', persistent: true,
     body: h('div', { class: 'form' },
       field('Product name *', name),
-      field('Brand', brand),
       field('Sizes / variants (comma separated)', sizes),
       field('Image URL', image),
       locId ? h('div', { class: 'field' },
@@ -564,7 +653,7 @@ function openProductEditor(product) {
     if (!name.value.trim()) return toast('Product name is required', 'error');
     const r = await busy('Saving…', async () => {
       const saved = await svc.saveProduct({
-        id: product && product.id, Title: name.value.trim(), Brand: brand.value.trim(),
+        id: product && product.id, Title: name.value.trim(),
         Sizes: parseSizes(sizes.value).join(', ') || 'OneSize', ImageUrl: image.value.trim(), Active: active.checked,
       });
       if (locId) {
@@ -587,29 +676,42 @@ function openProductEditor(product) {
 // ---------- locations ----------
 function openLocations() {
   const body = h('div', { class: 'stack' });
+  const countrySelect = code => h('select', { class: 'input', 'aria-label': 'Country', value: code },
+    COUNTRIES.map(c => h('option', { value: c.code }, c.name)));
+  const multi = COUNTRIES.length > 1;
   function draw() {
+    const sorted = [...svc.locations].sort((a, b) =>
+      COUNTRIES.findIndex(c => c.code === svc.countryOf(a)) - COUNTRIES.findIndex(c => c.code === svc.countryOf(b)) || a.Title.localeCompare(b.Title));
     body.replaceChildren(
-      ...svc.locations.map(l => {
-        const name = h('input', { class: 'input', value: l.Title });
+      ...sorted.map(l => {
+        const name = h('input', { class: 'input', value: l.Title, 'aria-label': 'Location name' });
+        const country = countrySelect(svc.countryOf(l));
         const act = h('input', { type: 'checkbox', checked: l.Active !== false });
-        return h('div', { class: 'loc-row' }, name, h('label', { class: 'check-row' }, act, 'Active'),
-          h('button', {
-            class: 'btn btn-outline', onclick: async () => {
-              if (!name.value.trim()) return toast('Name is required', 'error');
-              const r = await busy('Saving…', () => svc.saveLocation({ id: l.id, Title: name.value.trim(), Active: act.checked }));
-              if (r !== FAILED) { toast('Location saved', 'success'); draw(); }
-            }
-          }, 'Save'));
+        return h('div', { class: 'loc-row' }, name,
+          h('div', { class: 'loc-actions' },
+            multi ? country : null,
+            h('label', { class: 'check-row' }, act, 'Active'),
+            h('button', {
+              class: 'btn btn-outline', onclick: async () => {
+                if (!name.value.trim()) return toast('Name is required', 'error');
+                const r = await busy('Saving…', () => svc.saveLocation({ id: l.id, Title: name.value.trim(), Country: country.value, Active: act.checked }));
+                if (r !== FAILED) { toast('Location saved', 'success'); draw(); }
+              }
+            }, 'Save')));
       }),
       (() => {
         const name = h('input', { class: 'input', placeholder: 'New location name' });
-        return h('div', { class: 'loc-row new' }, name, h('button', {
-          class: 'btn btn-brand', onclick: async () => {
-            if (!name.value.trim()) return toast('Enter a name', 'error');
-            const r = await busy('Saving…', () => svc.saveLocation({ Title: name.value.trim(), Active: true }));
-            if (r !== FAILED) { toast('Location added', 'success'); draw(); }
-          }
-        }, icon('plus'), 'Add'));
+        const country = countrySelect(state.country);
+        return h('div', { class: 'loc-row new' }, name,
+          h('div', { class: 'loc-actions' },
+            multi ? country : null,
+            h('button', {
+              class: 'btn btn-brand', onclick: async () => {
+                if (!name.value.trim()) return toast('Enter a name', 'error');
+                const r = await busy('Saving…', () => svc.saveLocation({ Title: name.value.trim(), Country: country.value, Active: true }));
+                if (r !== FAILED) { toast('Location added', 'success'); draw(); }
+              }
+            }, icon('plus'), 'Add')));
       })());
   }
   draw();
@@ -723,7 +825,9 @@ function handoutCard(x) {
       x.Signature ? h('button', { class: 'link-btn', onclick: () => showSignature(x) }, 'View signature') : null),
     h('div', { class: 'hc-actions' },
       h('button', { class: 'icon-btn c-red', title: 'Delete', 'aria-label': 'Delete handout', onclick: () => deleteHandout(x) }, icon('trash')),
-      h('button', { class: 'icon-btn c-blue', title: 'Email receipt', 'aria-label': 'Email receipt', onclick: () => openReceipt(x) }, icon('mail'))));
+      h('button', { class: 'icon-btn c-blue', title: 'Email receipt', 'aria-label': 'Email receipt', onclick: () => openReceipt(
+        x.BatchId ? state.handouts.filter(y => y.BatchId === x.BatchId) : [x],
+        svc.person(x.PersonnelId) || { Title: x.PersonnelName }) }, icon('mail'))));
 }
 
 function showSignature(x) {
@@ -750,39 +854,48 @@ async function deleteHandout(x) {
   toast('Handout deleted', 'success');
 }
 
-async function sendReceipt(rows, person, to) {
-  if (demo) return;
-  await svc.sendReceipt({
-    to,
-    subject: receiptSubject(person, rows),
-    html: buildReceiptHtml({ appName: cfg.appName, person, rows, signatureSrc: rows[0].Signature ? 'cid:signature' : '' }),
-    signatureDataUrl: rows[0].Signature,
-  });
-}
-
-function openReceipt(x) {
-  const person = svc.person(x.PersonnelId) || { Title: x.PersonnelName };
-  const rows = x.BatchId ? state.handouts.filter(y => y.BatchId === x.BatchId) : [x];
+// Receipt for one handout batch: opens the email app with the receipt text, and offers the
+// receipt as an image (with signature) to share or download and attach.
+function openReceipt(rows, person) {
   const to = h('input', { class: 'input', type: 'email', value: person.Email || '', placeholder: 'name@company.com' });
   const frame = h('iframe', { class: 'receipt-frame', title: 'Receipt preview' });
-  frame.srcdoc = buildReceiptHtml({ appName: cfg.appName, person, rows, signatureSrc: x.Signature || '' });
+  frame.srcdoc = buildReceiptHtml({ appName: cfg.appName, person, rows, signatureSrc: rows[0].Signature || '' });
+  const fileName = `PPE receipt ${(person.Title || rows[0].PersonnelName || '').replace(/[^\w\- ]+/g, '')} ${(rows[0].HandoutDate || '').slice(0, 10)}.png`;
+  const canShareFiles = !!(navigator.canShare && navigator.canShare({ files: [new File([''], 'x.png', { type: 'image/png' })] }));
 
-  const m = openModal({
-    title: 'Email receipt', iconName: 'mail', iconClass: 'c-blue',
+  async function shareImage() {
+    const blob = await receiptImage({ appName: cfg.appName, person, rows });
+    const file = new File([blob], fileName, { type: 'image/png' });
+    if (canShareFiles) {
+      try {
+        await navigator.share({ files: [file], title: receiptSubject(person, rows), text: receiptText({ appName: cfg.appName, person, rows }) });
+      } catch (e) { if (e.name !== 'AbortError') toast(e.message, 'error'); }
+    } else {
+      const a = h('a', { href: URL.createObjectURL(blob), download: fileName });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+  }
+
+  function openEmail() {
+    const addr = to.value.trim();
+    if (addr && !/^\S+@\S+\.\S+$/.test(addr)) return toast('Enter a valid email address', 'error');
+    const body = receiptText({ appName: cfg.appName, person, rows });
+    const href = `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(receiptSubject(person, rows))}&body=${encodeURIComponent(body)}`;
+    const a = h('a', { href });
+    document.body.append(a); a.click(); a.remove();
+  }
+
+  openModal({
+    title: 'Receipt', iconName: 'mail', iconClass: 'c-blue',
     body: h('div', { class: 'form' },
       field('Send to', to),
-      demo ? h('div', { class: 'note' }, 'Demo mode: the email is not actually sent.') : null,
+      h('div', { class: 'note' }, 'Email apps cannot attach files automatically. To include the signature, also ',
+        canShareFiles ? 'share' : 'download', ' the receipt image and attach it to the email.'),
       field('Preview', frame)),
-    footer: h('button', {
-      class: 'btn btn-block btn-blue', onclick: async () => {
-        const addr = to.value.trim();
-        if (!/^\S+@\S+\.\S+$/.test(addr)) return toast('Enter a valid email address', 'error');
-        const r = await busy('Sending…', () => sendReceipt(rows, person, addr));
-        if (r === FAILED) return;
-        m.close();
-        toast(demo ? 'Demo mode: receipt not sent' : `Receipt sent to ${addr}`, 'success');
-      }
-    }, icon('mail'), 'Send receipt'),
+    footer: h('div', { class: 'stack' },
+      h('button', { class: 'btn btn-block btn-blue', onclick: openEmail }, icon('mail'), 'Open email with receipt'),
+      h('button', { class: 'btn btn-block btn-outline c-blue', onclick: shareImage }, icon('package'), canShareFiles ? 'Share receipt image' : 'Download receipt image')),
   });
 }
 
@@ -796,7 +909,7 @@ function openPersonEditor(person) {
     const company = h('input', { class: 'input', value: p.Company || '' });
     const empNo = h('input', { class: 'input', value: p.EmployeeNo || '' });
     const loc = h('select', { class: 'input', value: p.LocationId ? String(p.LocationId) : '' },
-      h('option', { value: '' }, '—'), svc.locations.map(l => h('option', { value: String(l.id) }, l.Title)));
+      h('option', { value: '' }, '—'), locationOptions(svc.locations));
     const active = h('input', { type: 'checkbox', checked: p.Active !== false });
     let saved = null;
 

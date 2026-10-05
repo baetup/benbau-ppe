@@ -1,18 +1,20 @@
-// App configuration — edit these values after creating the Entra ID app registration.
-// While clientId is empty the app runs in DEMO mode (sample data stored only in your browser).
+// App configuration.
+// While supabaseUrl / supabaseKey are empty the app runs in DEMO mode (sample data stored only in your browser).
 window.PPE_CONFIG = {
-  // Application (client) ID from Entra ID > App registrations > your app > Overview
-  clientId: "",
+  // Supabase > Project Settings > Data API (or "Connect") > Project URL, e.g. "https://abcdefgh.supabase.co"
+  supabaseUrl: "https://yquaxsgtgidcpwlcivqp.supabase.co",
 
-  // Directory (tenant) ID from the same Overview page (or your domain, e.g. "benbau.dk")
-  tenantId: "",
+  // Supabase > Project Settings > API Keys > the "publishable" key (sb_publishable_...) or the legacy "anon public" key.
+  // This key is meant to be public. NEVER put the "secret" / "service_role" key here.
+  supabaseKey: "sb_publishable_6PVzxXyALN3KDf-u7DwiUw_I6JRc-5t",
 
-  // The SharePoint site that holds the PPE lists
-  siteUrl: "https://YOURTENANT.sharepoint.com/sites/PPE",
+  // Name shown in the header, on the login screen and on receipts
+  appName: "Benbau PPE Tracker",
 
-  // Name shown in the header, login screen and email receipts
-  appName: "Benbau DK PPE Tracker",
-
-  // Optional. Leave empty to use the current page address as the sign-in redirect URI.
-  redirectUri: ""
+  // Countries the app covers. Each location belongs to one of these (set in Menu > Manage locations).
+  // The first one is the default. Add more lines to add more countries.
+  countries: [
+    { code: "DK", name: "Denmark" },
+    { code: "SE", name: "Sweden" }
+  ]
 };
