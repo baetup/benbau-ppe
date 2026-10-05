@@ -1,0 +1,11 @@
+{
+  "name": "Benbau DK PPE Tracker",
+  "short_name": "PPE Tracker",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#F3F4F6",
+  "theme_color": "#EF7D00",
+  "icons": [
+    { "src": "img/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
