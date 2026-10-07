@@ -16,5 +16,8 @@ window.PPE_CONFIG = {
   countries: [
     { code: "DK", name: "Denmark" },
     { code: "SE", name: "Sweden" }
-  ]
+  ],
+
+  // Dashboard: a size counts as "running low" when this many or fewer are left
+  lowStock: 2
 };

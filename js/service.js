@@ -61,9 +61,22 @@ export class PpeService {
     return m;
   }
 
-  setStock(productId, size, locationId, quantity) {
-    return this.db.setStock(productId, size, locationId, quantity);
+  setStock(productId, size, locationId, quantity, note) {
+    return this.db.setStock(productId, size, locationId, quantity, note);
   }
+
+  // Every stock row (all locations): Map "productId|size|locationId" -> quantity. Small: products × sizes × locations.
+  async getAllStock() {
+    const m = new Map();
+    for (const r of await this.db.list('stock')) m.set(`${r.ProductId}|${r.Size}|${r.LocationId}`, Number(r.Quantity) || 0);
+    return m;
+  }
+
+  // Dashboard numbers. Filters: { locationIds, from, to, bucket: 'week' | 'month' }
+  dashboardStats(f) { return this.db.dashboardStats(f); }
+
+  // Stock change log. Filters: { locationIds, productId, source, search, from, to, asc, offset, limit }
+  queryStockLog(f) { return this.db.queryStockLog(f); }
 
   // ---------- handouts & transfers (all-or-nothing) ----------
   async getHandoutsFor(personId) {
@@ -73,6 +86,22 @@ export class PpeService {
 
   handout({ person, locationId, items, reason, notes, date, signature }) {
     return this.db.handout({ personId: person.id, locationId, items, reason, notes, date, signature });
+  }
+
+  // History screen. Filters: { locationIds, productId, reason, search, from, to, sort, asc, offset, limit }
+  queryHandouts(f) { return this.db.queryHandouts(f); }
+  handoutSummary(f) { return this.db.handoutSummary(f); }
+  getHandoutBatch(batchId) { return this.db.getHandoutBatch(batchId); }
+
+  // Handouts of any of these products to this person in the last `months` months (any size).
+  recentHandouts(personId, productIds, months = 3) {
+    const since = new Date();
+    since.setMonth(since.getMonth() - months);
+    return this.db.recentHandouts(personId, [...new Set(productIds)], since.toISOString());
+  }
+
+  exchangeHandout(h, newSize, quantity, locationId) {
+    return this.db.exchangeHandout(h.id, newSize, quantity, locationId);
   }
 
   deleteHandout(h, returnToStock) {

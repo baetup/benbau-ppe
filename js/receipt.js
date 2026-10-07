@@ -1,25 +1,5 @@
-// Handout receipt: HTML preview, plain text (for the email body) and a PNG image (with signature).
+// Handout receipt: HTML preview and a PNG image (with signature).
 import { formatDate } from './ui.js';
-
-export function receiptText({ appName, person, rows }) {
-  const r = rows[0];
-  const lines = [
-    `PPE handout receipt – ${appName}`,
-    '',
-    `Receiver: ${person.Title || r.PersonnelName}`,
-    `Date: ${formatDate(r.HandoutDate)}`,
-    r.LocationName ? `Location: ${r.LocationName}` : null,
-    r.HandedOutBy ? `Handed out by: ${r.HandedOutBy}` : null,
-    r.Reason ? `Reason: ${r.Reason}` : null,
-    r.Notes ? `Notes: ${r.Notes}` : null,
-    '',
-    'Items:',
-    ...rows.map(x => `- ${x.Quantity} × ${x.Title} (size ${x.Size})`),
-    '',
-    r.Signature ? 'The receiver signed for these items. The signed receipt image is attached.' : null,
-  ];
-  return lines.filter(l => l !== null).join('\n');
-}
 
 // Draws the receipt (including the signature) on a canvas and returns a PNG Blob.
 export async function receiptImage({ appName, person, rows }) {
@@ -108,9 +88,6 @@ function truncate(ctx, text, max) {
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-export function receiptSubject(person, rows) {
-  return `PPE handout receipt – ${person.Title || rows[0].PersonnelName} – ${formatDate(rows[0].HandoutDate)}`;
-}
 
 // On-screen preview of the receipt.
 export function buildReceiptHtml({ appName, person, rows, signatureSrc }) {

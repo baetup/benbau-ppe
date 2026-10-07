@@ -84,7 +84,7 @@ export function confirmDialog(message, { title = 'Please confirm', okText = 'OK'
     const m = openModal({
       title, size: 'sm',
       body: h('div', { class: 'stack' },
-        h('p', { class: 'confirm-text' }, message),
+        h('div', { class: 'confirm-text' }, message),
         cb ? h('label', { class: 'check-row' }, cb, checkbox) : null),
       footer: h('div', { class: 'btn-row' },
         h('button', { class: 'btn btn-outline', onclick: () => m.close() }, 'Cancel'),

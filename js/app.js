@@ -5,11 +5,20 @@ import { PpeService, parseSizes } from './service.js';
 import { DemoDb } from './db-demo.js';
 import { SupabaseDb } from './db-supabase.js';
 import { createSignaturePad } from './signature.js';
-import { buildReceiptHtml, receiptSubject, receiptText, receiptImage } from './receipt.js';
+import { buildReceiptHtml, receiptImage } from './receipt.js';
+import { dashboardView } from './dashboard.js';
 
 const cfg = Object.assign({ appName: 'Benbau PPE Tracker' }, window.PPE_CONFIG || {});
 const demo = !cfg.supabaseUrl || !cfg.supabaseKey || new URLSearchParams(location.search).has('demo');
 const COUNTRIES = (cfg.countries && cfg.countries.length) ? cfg.countries : [{ code: 'DK', name: 'Denmark' }];
+// Clothing sizes stored on each person's profile: [field, label, placeholder]
+const PERSON_SIZES = [
+  ['BootsSize', 'Boots', 'e.g. 43'],
+  ['JacketSize', 'Jacket', 'e.g. L'],
+  ['TrouserSize', 'Trousers', 'e.g. 52 or L'],
+  ['VestSize', 'Vest', 'e.g. XL'],
+  ['GlovesSize', 'Gloves', 'e.g. 9'],
+];
 const countryName = code => (COUNTRIES.find(c => c.code === code) || { name: code || '—' }).name;
 const app = document.getElementById('app');
 document.title = cfg.appName;
@@ -22,7 +31,7 @@ let passwordRecovery = /type=recovery/.test(location.hash);
 const PREF_KEY = 'ppe-prefs-' + (demo ? 'demo' : 'live');
 const prefs = (() => { try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch { return {}; } })();
 const state = {
-  tab: prefs.tab || 'inventory',
+  tab: 'dashboard',                   // the app always opens on the Dashboard
   country: COUNTRIES.some(c => c.code === prefs.country) ? prefs.country : COUNTRIES[0].code,
   locationId: prefs.locationId || null,
   personId: prefs.personId || null,
@@ -216,6 +225,8 @@ async function chooseCountry() {
   if (!code || code === state.country) return;
   if (state.cart.length && !(await confirmDialog(`Your cart has items from ${svc.locName(state.cartLocationId)}. Switching country will empty the cart.`, { okText: 'Switch country' }))) return;
   state.country = code;
+  hist.country = code;
+  hist.locationId = 'all';
   state.cart = [];
   ensureLocation();
   state.cartLocationId = state.locationId;
@@ -233,8 +244,10 @@ function renderShell() {
       h('div', { class: 'header-inner' },
         h('div', { class: 'brand' }, h('span', { class: 'brand-logo' }, icon('layers')), h('span', { class: 'brand-name' }, cfg.appName)),
         h('nav', { class: 'tabs' },
+          tabButton('dashboard', 'Dashboard', 'chart'),
           tabButton('inventory', 'Inventory', 'package'),
-          tabButton('personnel', 'Personnel', 'users')),
+          tabButton('personnel', 'Personnel', 'users'),
+          tabButton('history', 'History', 'clock')),
         COUNTRIES.length > 1 ? h('button', { class: 'country-btn', title: `Country: ${countryName(state.country)}`, onclick: chooseCountry },
           icon('globe'), state.country, icon('chevronDown', 'chev')) : null,
         h('button', { class: 'avatar-btn', title: svc.user.name, onclick: openUserMenu }, initials))),
@@ -258,7 +271,16 @@ function tabButton(id, label, ic) {
 
 function renderView() {
   const view = document.getElementById('view');
-  if (view) view.replaceChildren(state.tab === 'inventory' ? inventoryView() : personnelView());
+  if (!view) return;
+  const views = {
+    inventory: inventoryView, personnel: personnelView, history: historyView,
+    dashboard: () => dashboardView({
+      svc, state, COUNTRIES, countryName, periodRange,
+      lowStock: Number(cfg.lowStock) >= 0 ? Number(cfg.lowStock) : 2,
+      showHandoutHistory,
+    }),
+  };
+  view.replaceChildren((views[state.tab] || views.dashboard)());
 }
 
 function openUserMenu() {
@@ -366,14 +388,20 @@ function fillProductList() {
   const list = document.getElementById('product-list');
   if (!list) return;
   const q = state.search.trim().toLowerCase();
-  const prods = svc.activeProducts().filter(p => !q || p.Title.toLowerCase().includes(q));
+  const hiddenCount = svc.products.length - svc.activeProducts().length;
+  if (!hiddenCount) state.showHidden = false;
+  const prods = (state.showHidden ? svc.products : svc.activeProducts()).filter(p => !q || p.Title.toLowerCase().includes(q));
+  const toggle = hiddenCount ? h('button', {
+    class: 'link-btn hidden-toggle', type: 'button',
+    onclick: () => { state.showHidden = !state.showHidden; fillProductList(); },
+  }, state.showHidden ? 'Hide hidden products' : `Show hidden products (${hiddenCount})`) : null;
   if (!prods.length) {
     list.replaceChildren(q
       ? emptyState('search', 'No matching products', 'Try another search.')
-      : emptyState('package', 'No products yet', 'Add your first product with “New product”.'));
+      : emptyState('package', 'No products yet', 'Add your first product with “New product”.'), ...(toggle ? [toggle] : []));
     return;
   }
-  list.replaceChildren(...prods.map(productCard));
+  list.replaceChildren(...prods.map(productCard), ...(toggle ? [toggle] : []));
 }
 
 function refreshCard(pid) {
@@ -404,10 +432,12 @@ function productCard(p) {
   });
   const step = d => { const v = Math.max(1, (parseInt(qtyInput.value, 10) || 0) + d); qtyInput.value = String(v); state.qty[p.id] = v; };
 
-  return h('article', { class: 'card product-card', 'data-id': p.id },
+  const hidden = p.Active === false;
+  return h('article', { class: 'card product-card' + (hidden ? ' is-hidden' : ''), 'data-id': p.id },
     h('div', { class: 'pc-top' },
       thumb(p, 'thumb'),
-      h('div', { class: 'pc-title' }, h('h3', null, p.Title)),
+      h('div', { class: 'pc-title' }, h('h3', null, p.Title),
+        hidden ? h('span', { class: 'tag tag-grey' }, 'Hidden — open Edit to show it again') : null),
       h('div', { class: 'pc-counts' },
         h('div', { class: 'count-stock' + (inStock <= 0 ? ' zero' : '') }, inStock), h('div', { class: 'count-label' }, 'in stock'),
         h('div', { class: 'count-cart' }, inCart), h('div', { class: 'count-label' }, 'in cart'))),
@@ -420,7 +450,7 @@ function productCard(p) {
         h('button', { type: 'button', 'aria-label': 'Less', onclick: () => step(-1) }, icon('minus')),
         qtyInput,
         h('button', { type: 'button', 'aria-label': 'More', onclick: () => step(1) }, icon('plus'))),
-      h('button', { class: 'btn btn-dark grow', onclick: () => addToCart(p, size, parseInt(qtyInput.value, 10) || 0) }, icon('cart'), 'Add'),
+      h('button', { class: 'btn btn-dark grow', disabled: hidden, onclick: () => addToCart(p, size, parseInt(qtyInput.value, 10) || 0) }, icon('cart'), 'Add'),
       h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(p) }, icon('edit'), h('span', { class: 'hide-xs' }, 'Edit'))));
 }
 
@@ -531,25 +561,43 @@ function openHandout(cartModal) {
   const notes = h('textarea', { class: 'input', rows: '2', placeholder: 'Extra notes' });
   const date = h('input', { class: 'input', type: 'date', value: todayISO(), max: todayISO() });
   const sig = createSignaturePad();
-  const emailCb = h('input', { type: 'checkbox' });
-  const emailText = h('span');
-  const emailRow = h('label', { class: 'check-row', hidden: true }, emailCb, emailText);
+  const receiptCb = h('input', { type: 'checkbox' });
+  const receiptRow = h('label', { class: 'check-row' }, receiptCb, 'Show receipt after saving');
+  const sizesBox = h('div', { hidden: true });
+  const warningBox = h('div', { hidden: true });
+  // Same items (any size) this person received in the last 3 months. null while checking.
+  let recent = null, recentCheck = null;
+  const checkRecent = p => {
+    recent = null;
+    warningBox.hidden = true;
+    recentCheck = svc.recentHandouts(p.id, state.cart.map(c => c.productId))
+      .then(rows => { if (person === p) { recent = rows; drawWarning(); } })
+      .catch(e => { if (person === p) { recent = undefined; console.error(e); } });
+    return recentCheck;
+  };
+  const drawWarning = () => {
+    warningBox.hidden = !recent || !recent.length;
+    if (warningBox.hidden) return;
+    warningBox.replaceChildren(recentWarning(person, recent));
+  };
   const onPerson = p => {
     person = p;
-    emailRow.hidden = !p.Email;
-    emailCb.checked = !!p.Email;
-    emailText.textContent = `Send receipt to ${p.Email || ''} after saving`;
+    sizesBox.replaceChildren(personSizes(p, true));
+    sizesBox.hidden = false;
+    checkRecent(p);
   };
 
   const m = openModal({
     title: 'Handout PPE', iconName: 'user', iconClass: 'c-brand', persistent: true,
     body: h('div', { class: 'form' },
       field('Personnel', personButton(null, onPerson)),
+      sizesBox,
+      warningBox,
       field('Reason', reason),
       field('Notes', notes),
       field('Date', date),
       field('Receiver signature', sig.el),
-      emailRow,
+      receiptRow,
       itemsSummary()),
     footer: h('button', { class: 'btn btn-block btn-green', onclick: submit }, icon('check'), 'Complete handout'),
   });
@@ -558,7 +606,13 @@ function openHandout(cartModal) {
     if (!person) return toast('Select the person receiving the PPE', 'error');
     if (!date.value) return toast('Choose a date', 'error');
     if (sig.isEmpty()) return toast('The receiver needs to sign', 'error');
-    const sendReceipt = emailCb.checked;
+    if (recent === null) await busy('Checking earlier handouts…', () => recentCheck);
+    if (recent === undefined) await busy('Checking earlier handouts…', () => checkRecent(person));
+    if (recent && recent.length) {
+      const ok = await confirmDialog(recentWarning(person, recent), { title: 'Already received recently', okText: 'Hand out anyway' });
+      if (!ok) return;
+    }
+    const showReceipt = receiptCb.checked;
     const rows = await busy('Saving handout…', () => svc.handout({
       person, locationId: state.locationId, items: state.cart.map(c => ({ ...c })),
       reason: reason.value, notes: notes.value.trim(), date: dateInputToIso(date.value), signature: sig.toDataURL(),
@@ -572,8 +626,19 @@ function openHandout(cartModal) {
     afterCartChange();
     loadStock();
     toast(`Handout to ${person.Title} saved`, 'success');
-    if (sendReceipt) openReceipt(rows, person);
+    if (showReceipt) openReceipt(rows, person);
   }
+}
+
+// Warning listing the same items a person already received in the last 3 months.
+function recentWarning(person, rows) {
+  const shown = rows.slice(0, 8);
+  return h('div', { class: 'warn-box' },
+    h('div', { class: 'warn-title' }, icon('alert'), `${person.Title} already received this in the last 3 months`),
+    h('ul', null, shown.map(x => h('li', null,
+      h('b', null, `${x.Quantity} × ${x.Title}`), ` (size ${x.Size}) — ${formatDate(x.HandoutDate)}`,
+      x.LocationName ? ` at ${x.LocationName}` : '', x.Reason ? h('span', { class: 'muted' }, ` · ${x.Reason}`) : null))),
+    rows.length > shown.length ? h('div', { class: 'muted small' }, `…and ${rows.length - shown.length} more`) : null);
 }
 
 function openTransfer(cartModal) {
@@ -634,6 +699,7 @@ function openProductEditor(product) {
   }
   sizes.addEventListener('input', drawStock);
   drawStock();
+  const stockNote = h('input', { class: 'input', list: 'stock-reasons', placeholder: 'e.g. Delivery received', autocomplete: 'off' });
 
   const m = openModal({
     title: isNew ? 'New product' : 'Edit product', iconName: 'package', iconClass: 'c-brand', persistent: true,
@@ -643,14 +709,25 @@ function openProductEditor(product) {
       field('Image URL', image),
       locId ? h('div', { class: 'field' },
         h('span', { class: 'field-label' }, `Stock at ${svc.locName(locId)}`),
-        h('span', { class: 'muted small' }, 'Use this to register deliveries or correct counts.'),
+        h('span', { class: 'muted small' }, 'Use this to register deliveries or correct counts. Every change is logged.'),
         stockGrid) : null,
+      locId ? field('Reason for stock change', h('div', null, stockNote,
+        h('datalist', { id: 'stock-reasons' }, STOCK_REASONS.map(r => h('option', { value: r }))))) : null,
+      !isNew && locId ? h('button', {
+        class: 'link-btn', type: 'button', onclick: () => {
+          m.close();
+          showStockHistory(product.id, locId);
+        }
+      }, `Show stock history of ${product.Title} at ${svc.locName(locId)}`) : null,
       h('label', { class: 'check-row' }, active, 'Active (uncheck to hide the product)')),
     footer: h('button', { class: 'btn btn-block btn-brand', onclick: save }, icon('check'), 'Save'),
   });
 
   async function save() {
     if (!name.value.trim()) return toast('Product name is required', 'error');
+    const changed = Object.entries(stockInputs).some(([s, inp]) =>
+      Math.max(0, parseInt(inp.value, 10) || 0) !== (product ? stockQty(product.id, s) : 0));
+    if (changed && !stockNote.value.trim()) return toast('Write a reason for the stock change', 'error');
     const r = await busy('Saving…', async () => {
       const saved = await svc.saveProduct({
         id: product && product.id, Title: name.value.trim(),
@@ -660,7 +737,7 @@ function openProductEditor(product) {
         for (const [s, inp] of Object.entries(stockInputs)) {
           const qty = Math.max(0, parseInt(inp.value, 10) || 0);
           const old = product ? stockQty(saved.id, s) : 0;
-          if (qty !== old) await svc.setStock(saved.id, s, locId, qty);
+          if (qty !== old) await svc.setStock(saved.id, s, locId, qty, stockNote.value.trim());
         }
       }
       return saved;
@@ -764,9 +841,24 @@ function personnelView() {
             if (await openPersonEditor(person)) renderView();
           }
         }, icon('edit'))),
+      personSizes(person),
       h('div', { class: 'filters', id: 'handout-filters' })),
     h('div', { class: 'muted small summary-line', id: 'handout-summary' }),
     h('div', { class: 'handout-list', id: 'handout-list' }));
+}
+
+// The person's clothing sizes as small labelled boxes. compact: only the recorded ones (handout form).
+function personSizes(p, compact = false) {
+  const known = PERSON_SIZES.filter(([key]) => p[key]);
+  if (!known.length) {
+    return h('div', { class: 'muted small sizes-empty' }, compact
+      ? 'No sizes recorded for this person.'
+      : 'No sizes recorded yet — use ✎ Edit to add boots, jacket, trouser, vest and gloves sizes.');
+  }
+  return h('div', { class: 'person-sizes' + (compact ? ' compact' : '') },
+    (compact ? known : PERSON_SIZES).map(([key, label]) => h('div', { class: 'size-box' },
+      h('span', { class: 'size-label' }, label),
+      h('span', { class: 'size-value' + (p[key] ? '' : ' none') }, p[key] || '—'))));
 }
 
 async function loadHandouts(personId) {
@@ -824,10 +916,73 @@ function handoutCard(x) {
       x.Notes ? h('div', { class: 'small muted' }, h('b', null, 'Notes: '), x.Notes) : null,
       x.Signature ? h('button', { class: 'link-btn', onclick: () => showSignature(x) }, 'View signature') : null),
     h('div', { class: 'hc-actions' },
-      h('button', { class: 'icon-btn c-red', title: 'Delete', 'aria-label': 'Delete handout', onclick: () => deleteHandout(x) }, icon('trash')),
-      h('button', { class: 'icon-btn c-blue', title: 'Email receipt', 'aria-label': 'Email receipt', onclick: () => openReceipt(
+      h('button', { class: 'icon-btn c-brand', title: 'Exchange size / delete', 'aria-label': 'Exchange size or delete handout', onclick: () => openHandoutActions(x) }, icon('edit')),
+      h('button', { class: 'icon-btn c-blue', title: 'Receipt', 'aria-label': 'Receipt', onclick: () => openReceipt(
         x.BatchId ? state.handouts.filter(y => y.BatchId === x.BatchId) : [x],
-        svc.person(x.PersonnelId) || { Title: x.PersonnelName }) }, icon('mail'))));
+        svc.person(x.PersonnelId) || { Title: x.PersonnelName }) }, icon('download'))));
+}
+
+// Exchange the size of a handout, or delete it.
+function openHandoutActions(x) {
+  const product = svc.product(x.ProductId);
+  const otherSizes = product ? svc.sizesOf(product).filter(s => s !== x.Size) : [];
+  const locs = svc.locationsIn(state.country);
+  const defaultLoc = locs.some(l => l.id === state.locationId) ? state.locationId : (locs[0] && locs[0].id);
+
+  let exchange;
+  if (!product) {
+    exchange = h('p', { class: 'muted small' }, 'This product no longer exists, so the size cannot be exchanged.');
+  } else if (!otherSizes.length) {
+    exchange = h('p', { class: 'muted small' }, 'This product has only one size.');
+  } else if (!locs.length) {
+    exchange = h('p', { class: 'muted small' }, `There are no locations in ${countryName(state.country)}.`);
+  } else {
+    const sizeSel = h('select', { class: 'input' });
+    const locSel = h('select', { class: 'input', value: String(defaultLoc), onchange: drawSizes }, locs.map(l => h('option', { value: String(l.id) }, l.Title)));
+    const qty = h('input', { class: 'input', type: 'number', min: '1', max: String(x.Quantity), inputmode: 'numeric', value: String(x.Quantity) });
+    async function drawSizes() {
+      const keep = sizeSel.value;
+      sizeSel.replaceChildren(h('option', null, 'Loading stock…'));
+      try {
+        const stock = await svc.getStock(Number(locSel.value));
+        sizeSel.replaceChildren(...otherSizes.map(s => h('option', { value: s }, `${s}   (${stock.get(`${x.ProductId}|${s}`) || 0} in stock)`)));
+        if (otherSizes.includes(keep)) sizeSel.value = keep;
+      } catch (e) {
+        sizeSel.replaceChildren(...otherSizes.map(s => h('option', { value: s }, s)));
+      }
+    }
+    drawSizes();
+    exchange = h('div', { class: 'form' },
+      field('New size', sizeSel),
+      x.Quantity > 1 ? field(`Quantity to exchange (max ${x.Quantity})`, qty) : null,
+      field('Exchange at', locSel),
+      h('div', { class: 'muted small' }, `Size ${x.Size} goes back into stock and the new size is taken from stock at this location.`),
+      h('button', {
+        class: 'btn btn-block btn-brand', onclick: async () => {
+          const n = x.Quantity > 1 ? parseInt(qty.value, 10) : 1;
+          if (!(n >= 1 && n <= x.Quantity)) return toast(`Quantity must be between 1 and ${x.Quantity}`, 'error');
+          if (!otherSizes.includes(sizeSel.value)) return toast('Choose the new size', 'error');
+          const r = await busy('Exchanging…', () => svc.exchangeHandout(x, sizeSel.value, n, Number(locSel.value)));
+          if (r === FAILED) return;
+          m.close();
+          state.stockLoc = null;
+          toast(`Exchanged ${n} × ${x.Title}: ${x.Size} → ${sizeSel.value}`, 'success');
+          loadHandouts(state.personId);
+        }
+      }, icon('swap'), 'Exchange size'));
+  }
+
+  const m = openModal({
+    title: 'Change handout', iconName: 'edit', iconClass: 'c-brand',
+    body: h('div', { class: 'stack' },
+      h('div', { class: 'items-summary' },
+        h('b', null, `${x.Quantity} × ${x.Title} — size ${x.Size}`),
+        h('div', { class: 'muted' }, `${x.PersonnelName || ''} · ${formatDate(x.HandoutDate)}${x.LocationName ? ' · ' + x.LocationName : ''}`)),
+      h('h3', { class: 'section-title' }, 'Exchange size'),
+      exchange,
+      h('h3', { class: 'section-title' }, 'Delete handout'),
+      h('button', { class: 'btn btn-block btn-outline c-red', onclick: () => { m.close(); deleteHandout(x); } }, icon('trash'), 'Delete handout')),
+  });
 }
 
 function showSignature(x) {
@@ -854,49 +1009,332 @@ async function deleteHandout(x) {
   toast('Handout deleted', 'success');
 }
 
-// Receipt for one handout batch: opens the email app with the receipt text, and offers the
-// receipt as an image (with signature) to share or download and attach.
+// Receipt for one handout batch, downloadable as an image (with signature).
 function openReceipt(rows, person) {
-  const to = h('input', { class: 'input', type: 'email', value: person.Email || '', placeholder: 'name@company.com' });
   const frame = h('iframe', { class: 'receipt-frame', title: 'Receipt preview' });
   frame.srcdoc = buildReceiptHtml({ appName: cfg.appName, person, rows, signatureSrc: rows[0].Signature || '' });
   const fileName = `PPE receipt ${(person.Title || rows[0].PersonnelName || '').replace(/[^\w\- ]+/g, '')} ${(rows[0].HandoutDate || '').slice(0, 10)}.png`;
-  const canShareFiles = !!(navigator.canShare && navigator.canShare({ files: [new File([''], 'x.png', { type: 'image/png' })] }));
 
-  async function shareImage() {
+  async function download() {
     const blob = await receiptImage({ appName: cfg.appName, person, rows });
-    const file = new File([blob], fileName, { type: 'image/png' });
-    if (canShareFiles) {
-      try {
-        await navigator.share({ files: [file], title: receiptSubject(person, rows), text: receiptText({ appName: cfg.appName, person, rows }) });
-      } catch (e) { if (e.name !== 'AbortError') toast(e.message, 'error'); }
-    } else {
-      const a = h('a', { href: URL.createObjectURL(blob), download: fileName });
-      document.body.append(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    }
-  }
-
-  function openEmail() {
-    const addr = to.value.trim();
-    if (addr && !/^\S+@\S+\.\S+$/.test(addr)) return toast('Enter a valid email address', 'error');
-    const body = receiptText({ appName: cfg.appName, person, rows });
-    const href = `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(receiptSubject(person, rows))}&body=${encodeURIComponent(body)}`;
-    const a = h('a', { href });
+    const a = h('a', { href: URL.createObjectURL(blob), download: fileName });
     document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
   }
 
   openModal({
-    title: 'Receipt', iconName: 'mail', iconClass: 'c-blue',
-    body: h('div', { class: 'form' },
-      field('Send to', to),
-      h('div', { class: 'note' }, 'Email apps cannot attach files automatically. To include the signature, also ',
-        canShareFiles ? 'share' : 'download', ' the receipt image and attach it to the email.'),
-      field('Preview', frame)),
-    footer: h('div', { class: 'stack' },
-      h('button', { class: 'btn btn-block btn-blue', onclick: openEmail }, icon('mail'), 'Open email with receipt'),
-      h('button', { class: 'btn btn-block btn-outline c-blue', onclick: shareImage }, icon('package'), canShareFiles ? 'Share receipt image' : 'Download receipt image')),
+    title: 'Receipt', iconName: 'download', iconClass: 'c-blue',
+    body: frame,
+    footer: h('button', { class: 'btn btn-block btn-blue', onclick: download }, icon('download'), 'Download receipt image'),
   });
+}
+
+// ---------- history ----------
+// Filtering, sorting and paging happen in the database, so this stays fast with thousands of handouts.
+const HIST_PAGE = 50;
+const HIST_PERIODS = [
+  ['week', 'This week'], ['lastweek', 'Last week'], ['month', 'This month'], ['lastmonth', 'Last month'],
+  ['year', 'This year'], ['lastyear', 'Last year'], ['30', 'Last 30 days'], ['90', 'Last 3 months'], ['365', 'Last 12 months'],
+  ['all', 'All time'], ['custom', 'Custom dates…'],
+];
+const HIST_SORTS = [
+  ['date-desc', 'Newest first'], ['date-asc', 'Oldest first'], ['person-asc', 'Person A–Z'],
+  ['product-asc', 'Equipment A–Z'], ['location-asc', 'Location A–Z'],
+];
+const STOCK_SOURCES = ['Manual edit', 'Handout', 'Transfer', 'Handout deleted', 'Size exchange', 'Database edit', 'Other'];
+const STOCK_REASONS = ['Delivery received', 'Stock count correction', 'Damaged / discarded', 'Initial stock count', 'Returned by worker'];
+const HIST_DEFAULTS = {
+  locationId: 'all', productId: 'all', period: 'month', from: '', to: '',
+  reason: 'all', search: '', sort: 'date-desc',          // handouts view
+  source: 'all', by: '', stockSort: 'desc',              // stock changes view
+};
+const hist = {
+  mode: 'handouts', country: null, ...HIST_DEFAULTS,
+  rows: [], total: 0, summary: [], totalsOpen: false, seq: 0,
+};
+
+function goToTab(tab) {
+  state.tab = tab;
+  savePrefs();
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderView();
+  window.scrollTo(0, 0);
+}
+
+// Opens History > Handouts for one product with the Dashboard's country / location / period.
+function showHandoutHistory(productId, { country, locationId, period }) {
+  Object.assign(hist, HIST_DEFAULTS, { mode: 'handouts', country, locationId: String(locationId), productId: String(productId), period });
+  goToTab('history');
+}
+
+// Opens History > Stock changes for one product at one location (from the product Edit form).
+function showStockHistory(productId, locationId) {
+  const loc = svc.location(locationId);
+  Object.assign(hist, HIST_DEFAULTS, {
+    mode: 'stock', country: loc ? svc.countryOf(loc) : state.country,
+    locationId: String(locationId), productId: String(productId), period: 'all',
+  });
+  goToTab('history');
+}
+
+// Start (inclusive) and end (exclusive) of a period, as ISO timestamps. Weeks start on Monday.
+function periodRange(key, fromStr, toStr) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  const monday = addDays(today, -((today.getDay() + 6) % 7));
+  const y = now.getFullYear(), m = now.getMonth();
+  const r = (from, to) => ({ from: from ? from.toISOString() : null, to: to ? to.toISOString() : null });
+  switch (key) {
+    case 'week': return r(monday);
+    case 'lastweek': return r(addDays(monday, -7), monday);
+    case 'month': return r(new Date(y, m, 1));
+    case 'lastmonth': return r(new Date(y, m - 1, 1), new Date(y, m, 1));
+    case 'year': return r(new Date(y, 0, 1));
+    case 'lastyear': return r(new Date(y - 1, 0, 1), new Date(y, 0, 1));
+    case '30': return r(addDays(today, -30));
+    case '90': return r(new Date(y, m - 3, now.getDate()));
+    case '365': return r(addDays(today, -365));
+    case 'custom': return r(fromStr ? new Date(fromStr + 'T00:00:00') : null, toStr ? addDays(new Date(toStr + 'T00:00:00'), 1) : null);
+    default: return r(null, null);
+  }
+}
+
+function histFilters() {
+  let locationIds = null;
+  if (hist.locationId !== 'all') locationIds = [Number(hist.locationId)];
+  else if (hist.country !== 'all') locationIds = svc.locations.filter(l => svc.countryOf(l) === hist.country).map(l => l.id);
+  const common = {
+    locationIds,
+    productId: hist.productId === 'all' ? null : Number(hist.productId),
+    ...periodRange(hist.period, hist.from, hist.to),
+  };
+  if (hist.mode === 'stock') {
+    return { ...common, source: hist.source === 'all' ? null : hist.source, search: hist.by.trim() || null, asc: hist.stockSort === 'asc' };
+  }
+  const [sort, dir] = hist.sort.split('-');
+  return { ...common, reason: hist.reason === 'all' ? null : hist.reason, search: hist.search.trim() || null, sort, asc: dir === 'asc' };
+}
+
+const queryHistory = f => (hist.mode === 'stock' ? svc.queryStockLog(f) : svc.queryHandouts(f));
+
+function historyView() {
+  if (hist.country === null) hist.country = state.country;
+  queueMicrotask(() => { renderHistoryFilters(); reloadHistory(); });
+  const modeBtn = (mode, label) => h('button', {
+    class: 'seg-btn' + (hist.mode === mode ? ' active' : ''), type: 'button',
+    onclick: () => { if (hist.mode !== mode) { hist.mode = mode; renderView(); } },
+  }, label);
+  return h('div', { class: 'history' },
+    h('div', { class: 'segmented' }, modeBtn('handouts', 'Handouts'), modeBtn('stock', 'Stock changes')),
+    h('section', { class: 'card' },
+      h('div', { class: 'hist-filters', id: 'hist-filters' }),
+      h('div', { class: 'hist-actions' },
+        h('div', { class: 'muted small', id: 'hist-count' }),
+        h('div', { class: 'btn-row' },
+          h('button', { class: 'btn btn-outline', onclick: resetHistoryFilters }, icon('refresh'), h('span', { class: 'hide-sm' }, 'Reset')),
+          h('button', { class: 'btn btn-outline', onclick: exportHistory }, icon('download'), 'Export CSV')))),
+    hist.mode === 'handouts' ? h('details', {
+      class: 'card hist-totals', id: 'hist-totals', open: hist.totalsOpen,
+      ontoggle: e => { hist.totalsOpen = e.target.open; },
+    }, h('summary', null, 'Totals by equipment'), h('div', { id: 'hist-totals-body' })) : null,
+    h('div', { class: 'hist-list' + (hist.mode === 'stock' ? ' stock-list' : ''), id: 'hist-list' }));
+}
+
+function renderHistoryFilters() {
+  const box = document.getElementById('hist-filters');
+  if (!box) return;
+  const select = (key, label, options, after) => field(label, h('select', {
+    class: 'input', value: String(hist[key]),
+    onchange: e => { hist[key] = e.target.value; if (after) after(); renderHistoryFilters(); reloadHistory(); },
+  }, options.map(([v, l]) => h('option', { value: String(v) }, l))));
+
+  const locs = svc.locations.filter(l => hist.country === 'all' || svc.countryOf(l) === hist.country);
+  if (hist.locationId !== 'all' && !locs.some(l => String(l.id) === String(hist.locationId))) hist.locationId = 'all';
+  let searchTimer;
+  const searchField = (key, label) => field(label, h('input', {
+    class: 'input', type: 'search', placeholder: 'Search name…', value: hist[key],
+    oninput: e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { hist[key] = e.target.value; reloadHistory(); }, 350); },
+  }));
+  const stock = hist.mode === 'stock';
+
+  box.replaceChildren(...[
+    COUNTRIES.length > 1 ? select('country', 'Country', [['all', 'All countries'], ...COUNTRIES.map(c => [c.code, c.name])], () => { hist.locationId = 'all'; }) : null,
+    select('locationId', 'Location', [['all', 'All locations'], ...locs.map(l => [l.id, l.Title + (l.Active === false ? ' (inactive)' : '')])]),
+    select('productId', 'Equipment', [['all', 'All equipment'], ...svc.products.map(p => [p.id, p.Title])]),
+    stock
+      ? select('source', 'Type of change', [['all', 'All changes'], ...STOCK_SOURCES.map(s => [s, s])])
+      : select('reason', 'Reason', [['all', 'All reasons'], ...REASONS.map(r => [r, r])]),
+    select('period', 'Period', HIST_PERIODS),
+    hist.period === 'custom' ? field('From', h('input', { class: 'input', type: 'date', value: hist.from, onchange: e => { hist.from = e.target.value; reloadHistory(); } })) : null,
+    hist.period === 'custom' ? field('To', h('input', { class: 'input', type: 'date', value: hist.to, onchange: e => { hist.to = e.target.value; reloadHistory(); } })) : null,
+    stock ? searchField('by', 'Changed by') : searchField('search', 'Person'),
+    stock
+      ? select('stockSort', 'Sort by', [['desc', 'Newest first'], ['asc', 'Oldest first']])
+      : select('sort', 'Sort by', HIST_SORTS),
+  ].filter(Boolean));
+}
+
+function resetHistoryFilters() {
+  Object.assign(hist, HIST_DEFAULTS, { country: state.country });
+  renderHistoryFilters();
+  reloadHistory();
+}
+
+async function reloadHistory() {
+  const seq = ++hist.seq;
+  const list = document.getElementById('hist-list');
+  if (!list) return;
+  list.replaceChildren(h('div', { class: 'loading' }, h('div', { class: 'spinner' }), 'Loading history…'));
+  const f = histFilters();
+  try {
+    const [page, summary] = await Promise.all([
+      queryHistory({ ...f, offset: 0, limit: HIST_PAGE }),
+      hist.mode === 'handouts' ? svc.handoutSummary(f) : [],
+    ]);
+    if (seq !== hist.seq) return; // a newer search started meanwhile
+    hist.rows = page.rows;
+    hist.total = page.total;
+    hist.summary = summary;
+  } catch (e) {
+    if (seq === hist.seq) list.replaceChildren(errorBox(e, reloadHistory));
+    return;
+  }
+  fillHistory();
+}
+
+async function loadMoreHistory(btn) {
+  const seq = hist.seq;
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  try {
+    const page = await queryHistory({ ...histFilters(), offset: hist.rows.length, limit: HIST_PAGE });
+    if (seq !== hist.seq) return;
+    hist.rows = hist.rows.concat(page.rows);
+    hist.total = page.total;
+  } catch (e) {
+    toast(errorMessage(e), 'error');
+  }
+  fillHistory();
+}
+
+function fillHistory() {
+  const list = document.getElementById('hist-list');
+  if (!list) return;
+  const stock = hist.mode === 'stock';
+  const items = hist.summary.reduce((a, s) => a + Number(s.Quantity), 0);
+  const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`;
+  document.getElementById('hist-count').textContent = !hist.total ? ''
+    : stock ? plural(hist.total, 'stock change')
+    : `${plural(hist.total, 'handout record')} · ${plural(items, 'item')}`;
+  if (!stock) fillHistoryTotals();
+
+  if (!hist.rows.length) {
+    list.replaceChildren(emptyState('clock', stock ? 'No stock changes' : 'No handouts', 'Nothing matches these filters. Try a longer period or “All”.'));
+    return;
+  }
+  const head = stock
+    ? h('div', { class: 'hist-row stock-row hist-head' },
+        h('span', null, 'Date'), h('span', null, 'Equipment'), h('span', null, 'Location'),
+        h('span', null, 'Change'), h('span', null, 'Type'), h('span', null, 'Changed by'))
+    : h('div', { class: 'hist-row hist-head' },
+        h('span', null, 'Date'), h('span', null, 'Person'), h('span', null, 'Equipment'),
+        h('span', null, 'Qty'), h('span', null, 'Location'), h('span', null, 'Reason'));
+  const more = hist.rows.length < hist.total
+    ? [h('button', { class: 'btn btn-block btn-outline load-more', onclick: e => loadMoreHistory(e.currentTarget) },
+        `Load more (${(hist.total - hist.rows.length).toLocaleString()} more)`)]
+    : [];
+  list.replaceChildren(head, ...hist.rows.map(stock ? stockLogRow : historyRow), ...more);
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '—' : `${formatDate(iso)} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function stockLogRow(x) {
+  const loc = svc.location(x.LocationId);
+  const ch = Number(x.Change);
+  return h('div', { class: 'hist-row stock-row' },
+    h('span', { class: 'hr-date' }, formatDateTime(x.ChangedAt)),
+    h('span', { class: 'hr-product' }, x.ProductTitle || '—', h('span', { class: 'muted' }, ` · ${x.Size}`)),
+    h('span', { class: 'hr-loc' }, x.LocationName || '—', loc && COUNTRIES.length > 1 ? h('span', { class: 'muted' }, ` · ${svc.countryOf(loc)}`) : null),
+    h('span', { class: 'hr-change' }, `${x.OldQuantity} → ${x.NewQuantity} `,
+      h('span', { class: 'delta ' + (ch >= 0 ? 'up' : 'down') }, (ch > 0 ? '+' : ch < 0 ? '−' : '') + Math.abs(ch))),
+    h('span', { class: 'hr-type' }, h('b', null, x.Source), x.Note ? h('span', { class: 'muted' }, ` · ${x.Note}`) : null),
+    h('span', { class: 'hr-by muted' }, x.ChangedBy || '—'));
+}
+
+function fillHistoryTotals() {
+  const body = document.getElementById('hist-totals-body');
+  if (!body) return;
+  if (!hist.summary.length) { body.replaceChildren(h('p', { class: 'muted small' }, 'No handouts in this selection.')); return; }
+  const byProduct = new Map();
+  for (const s of hist.summary) {
+    if (!byProduct.has(s.Title)) byProduct.set(s.Title, []);
+    byProduct.get(s.Title).push(s);
+  }
+  const sizeOrder = title => { const p = svc.products.find(x => x.Title === title); return p ? svc.sizesOf(p) : []; };
+  body.replaceChildren(h('div', { class: 'totals-grid' },
+    [...byProduct.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([title, sizes]) => {
+      const order = sizeOrder(title);
+      const rank = s => { const i = order.indexOf(s); return i < 0 ? 999 : i; };
+      sizes.sort((a, b) => rank(a.Size) - rank(b.Size) || String(a.Size).localeCompare(String(b.Size)));
+      const total = sizes.reduce((a, s) => a + Number(s.Quantity), 0);
+      return h('div', { class: 'total-item' },
+        h('div', { class: 'total-head' }, h('span', null, title), h('b', null, total.toLocaleString())),
+        h('div', { class: 'muted small' }, sizes.map(s => `${s.Size}: ${Number(s.Quantity).toLocaleString()}`).join(' · ')));
+    })));
+}
+
+function historyRow(x) {
+  const loc = svc.location(x.LocationId);
+  return h('button', { class: 'hist-row', type: 'button', title: 'Show receipt', onclick: () => openHistoryReceipt(x) },
+    h('span', { class: 'hr-date' }, formatDate(x.HandoutDate)),
+    h('span', { class: 'hr-person' }, x.PersonnelName || '—'),
+    h('span', { class: 'hr-product' }, x.Title, h('span', { class: 'muted' }, ` · ${x.Size}`)),
+    h('span', { class: 'hr-qty' }, `× ${x.Quantity}`),
+    h('span', { class: 'hr-loc' }, x.LocationName || '—', loc && COUNTRIES.length > 1 ? h('span', { class: 'muted' }, ` · ${svc.countryOf(loc)}`) : null),
+    h('span', { class: 'hr-reason muted' }, x.Reason || ''));
+}
+
+async function openHistoryReceipt(x) {
+  const rows = await busy('Loading receipt…', () => svc.getHandoutBatch(x.BatchId));
+  if (rows === FAILED || !rows.length) return;
+  openReceipt(rows, svc.person(x.PersonnelId) || { Title: x.PersonnelName });
+}
+
+// Exports every row matching the filters (not just the loaded page). Semicolons so Excel in DK/SE opens it directly.
+async function exportHistory() {
+  const f = histFilters();
+  const stock = hist.mode === 'stock';
+  const rows = await busy('Preparing export…', async () => {
+    let all = [];
+    for (let offset = 0; ; offset += 1000) {
+      const page = await queryHistory({ ...f, offset, limit: 1000 });
+      all = all.concat(page.rows);
+      if (!page.rows.length || all.length >= page.total) return all;
+    }
+  });
+  if (rows === FAILED) return;
+  if (!rows.length) return toast('Nothing to export', 'error');
+  const cell = v => { const s = String(v == null ? '' : v); return /[;"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const day = iso => (iso ? new Date(iso).toLocaleDateString('sv-SE') : '');
+  const country = id => { const loc = svc.location(id); return loc ? countryName(svc.countryOf(loc)) : ''; };
+  const header = stock
+    ? ['Date', 'Time', 'Equipment', 'Size', 'Location', 'Country', 'Old quantity', 'New quantity', 'Change', 'Type', 'Note', 'Changed by']
+    : ['Date', 'Person', 'Equipment', 'Size', 'Quantity', 'Location', 'Country', 'Reason', 'Notes', 'Handed out by'];
+  const lines = rows.map(x => (stock
+    ? [day(x.ChangedAt), new Date(x.ChangedAt).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }), x.ProductTitle, x.Size,
+       x.LocationName, country(x.LocationId), x.OldQuantity, x.NewQuantity, x.Change, x.Source, x.Note, x.ChangedBy]
+    : [day(x.HandoutDate), x.PersonnelName, x.Title, x.Size, x.Quantity,
+       x.LocationName, country(x.LocationId), x.Reason, x.Notes, x.HandedOutBy]
+  ).map(cell).join(';'));
+  const blob = new Blob(['﻿' + [header.join(';'), ...lines].join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: `PPE ${stock ? 'stock changes' : 'handouts'} ${todayISO()}.csv` });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  toast(`Exported ${rows.length.toLocaleString()} rows`, 'success');
 }
 
 function openPersonEditor(person) {
@@ -911,17 +1349,22 @@ function openPersonEditor(person) {
     const loc = h('select', { class: 'input', value: p.LocationId ? String(p.LocationId) : '' },
       h('option', { value: '' }, '—'), locationOptions(svc.locations));
     const active = h('input', { type: 'checkbox', checked: p.Active !== false });
+    const sizeInputs = PERSON_SIZES.map(([key, label, placeholder]) =>
+      [key, label, h('input', { class: 'input', value: p[key] || '', placeholder, autocomplete: 'off' })]);
     let saved = null;
 
     const m = openModal({
       title: isNew ? 'Add person' : 'Edit person', iconName: isNew ? 'userPlus' : 'user', iconClass: 'c-brand', persistent: true,
       body: h('div', { class: 'form' },
         field('Full name *', name),
-        field('Email (for receipts)', email),
+        field('Email', email),
         field('Phone', phone),
         field('Company', company),
         field('Employee no.', empNo),
         field('Site / location', loc),
+        h('div', { class: 'field' },
+          h('span', { class: 'field-label' }, 'Sizes'),
+          h('div', { class: 'size-inputs' }, sizeInputs.map(([, label, inp]) => h('label', { class: 'stock-cell' }, h('span', null, label), inp)))),
         h('label', { class: 'check-row' }, active, 'Active')),
       footer: h('button', {
         class: 'btn btn-block btn-brand', onclick: async () => {
@@ -932,6 +1375,7 @@ function openPersonEditor(person) {
             id: person && person.id, Title: name.value.trim(), Email: email.value.trim(), Phone: phone.value.trim(),
             Company: company.value.trim(), EmployeeNo: empNo.value.trim(),
             LocationId: lid, LocationName: lid ? svc.locName(lid) : '', Active: active.checked,
+            ...Object.fromEntries(sizeInputs.map(([key, , inp]) => [key, inp.value.trim()])),
           }));
           if (r === FAILED) return;
           saved = r;

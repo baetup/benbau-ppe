@@ -94,15 +94,55 @@ Open the address on the phone. On iPhone: Share → **Add to Home Screen**. On A
   country of their site; people without a site show in every country.
 - Products are shared. Stock is kept per location. Transfers can go to any location.
 
-### Receipts
-The ✉ button on a handout, and the "Send receipt" option when saving a handout, open a receipt with:
-- **Open email with receipt**: opens the phone's or PC's email app with the address, subject and
-  receipt text filled in.
-- **Share / Download receipt image**: a PNG of the receipt **including the signature**. On a phone,
-  Share lets you pick the mail app and attach it directly. On a PC it downloads, and you attach it.
+### Dashboard tab
+Choose a **country**, **location** (or all) and **consumption period**:
+- **Tiles:** items handed out (with number of handouts and people), items in stock now, sizes out of
+  stock, sizes running low. Tap the out-of-stock / running-low tiles to jump to the problem list.
+- **Items handed out per week / month:** column chart (weekly for periods up to 3 months). Tap a
+  column for the exact number.
+- **Most used equipment**, **By location** and **By reason:** ranked bars. Tap equipment to open those
+  handouts in History.
+- **Stock check:** with all locations, a product × location table of totals (tap a number to see each
+  size); with one location, every product with its sizes. **Out** = a size that ran out, **Low** =
+  `lowStock` (config.js, default 2) or fewer left. Sizes never stocked at a location are not counted
+  as out. Tick "Only out of stock / running low" to see just the problems.
+- The numbers are calculated in the database, so the dashboard stays fast with a large history.
 
-Email apps can't attach files automatically from a link. If you later want fully automatic emails,
-that can be added with a free email service (e.g. Resend) and a Supabase Edge Function.
+### History tab
+All handouts, filterable by **country, location, equipment, reason, period** (this/last week, month,
+year, last 30 days / 12 months, all time or custom dates) and **person**. You can sort by date, person,
+equipment or location.
+- Filtering, sorting and paging run in the database, 50 rows at a time (**Load more**), so it stays
+  fast with tens of thousands of handouts.
+- **Totals by equipment** shows how many items of each product and size were handed out in the selection.
+- **Export CSV** downloads every row matching the filters (not just the loaded ones). The file uses
+  semicolons, so Excel opens it directly.
+- Click a row to see its receipt with the signature.
+
+### Stock change log (History → Stock changes)
+Every change to a stock quantity is recorded automatically by the database: **when, who, which product,
+size and location, old → new quantity**, the type of change and a note.
+- Types: **Manual edit** (product Edit form; a reason such as "Delivery received" is required),
+  **Handout** (note: who received it), **Transfer** (to/from which location), **Handout deleted**
+  (items returned to stock), **Size exchange**, and **Database edit** (changed directly in the Supabase
+  dashboard).
+- The log is written by a database trigger, so it can't be skipped. App users can read it but can't
+  change or delete it.
+- Filter by country, location, equipment, type, period and who made the change. **Export CSV** works here too.
+- Shortcut: in a product's **Edit** form, click **Show stock history of … at …**.
+
+### Changing a handout
+The ✎ button on a handout card (Personnel tab) opens **Change handout**:
+- **Exchange size**: choose the new size, how many to exchange and the location where it happens.
+  The old size goes back into stock and the new size is taken out, in one step. The handout keeps its
+  original date and signature, and a note records the exchange. Exchanging only part of a handout
+  (e.g. 1 of 2 pairs of boots) splits it into two records.
+- **Delete handout**: with the option to return the items to stock.
+
+### Receipts
+The download button on a handout card, and the "Show receipt after saving" option when saving a
+handout, show the receipt with a **Download receipt image** button: a PNG of the receipt including
+the signature.
 
 ### Data & backups
 - View and export the data in Supabase **Table Editor** (each table has **Export to CSV**).

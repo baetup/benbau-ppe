@@ -1,6 +1,6 @@
 // Demo data store with the same interface as SupabaseDb, kept in localStorage.
 // The stock operations mirror the database functions in supabase/setup.sql.
-const KEY = 'ppe-demo-db-v4';
+const KEY = 'ppe-demo-db-v7';
 
 export class DemoDb {
   constructor(user) {
@@ -47,10 +47,25 @@ export class DemoDb {
     write(this.data);
   }
 
-  async setStock(productId, size, locationId, quantity) {
+  async setStock(productId, size, locationId, quantity, note) {
+    return this.transaction(() => {
+      this.ctx = { source: 'Manual edit', note };
+      this.setQuantity(this.stockRow(productId, size, locationId), quantity);
+    });
+  }
+
+  async queryStockLog(f) {
     await tick();
-    this.stockRow(productId, size, locationId).Quantity = quantity;
-    write(this.data);
+    const q = (f.search || '').toLowerCase();
+    const rows = this.rows('stock_log').filter(r =>
+      (!f.locationIds || f.locationIds.includes(r.LocationId)) &&
+      (!f.productId || r.ProductId === f.productId) &&
+      (!f.source || r.Source === f.source) &&
+      (!q || (r.ChangedBy || '').toLowerCase().includes(q)) &&
+      (!f.from || r.ChangedAt >= f.from) &&
+      (!f.to || r.ChangedAt < f.to))
+      .sort((a, b) => (a.ChangedAt.localeCompare(b.ChangedAt) || a.id - b.id) * (f.asc ? 1 : -1));
+    return { rows: clone(rows.slice(f.offset, f.offset + f.limit)), total: rows.length };
   }
 
   async handout({ personId, locationId, items, reason, notes, date, signature }) {
@@ -58,6 +73,7 @@ export class DemoDb {
       const person = this.find('personnel', personId);
       const loc = this.find('locations', locationId);
       if (!person) throw new Error('Person not found');
+      this.ctx = { source: 'Handout', note: `To ${person.Title}` };
       const batchId = `demo-${Date.now()}`;
       return items.map(it => {
         const p = this.find('products', it.productId);
@@ -78,7 +94,10 @@ export class DemoDb {
       const from = this.find('locations', fromId), to = this.find('locations', toId);
       for (const it of items) {
         const p = this.find('products', it.productId);
+        const why = reason ? `: ${reason}` : '';
+        this.ctx = { source: 'Transfer', note: `To ${to.Title}${why}` };
         this.adjust(it.productId, it.size, fromId, -it.qty, false);
+        this.ctx = { source: 'Transfer', note: `From ${from.Title}${why}` };
         this.adjust(it.productId, it.size, toId, it.qty, true);
         this.rows('transfers').push({
           id: ++this.data.nextId, ProductId: p.id, Title: p.Title, Size: it.size, Quantity: it.qty,
@@ -89,10 +108,111 @@ export class DemoDb {
     });
   }
 
+  filterHandouts(f) {
+    const q = (f.search || '').toLowerCase();
+    return this.rows('handouts').filter(h =>
+      (!f.locationIds || f.locationIds.includes(h.LocationId)) &&
+      (!f.productId || h.ProductId === f.productId) &&
+      (!f.reason || h.Reason === f.reason) &&
+      (!q || (h.PersonnelName || '').toLowerCase().includes(q)) &&
+      (!f.from || h.HandoutDate >= f.from) &&
+      (!f.to || h.HandoutDate < f.to));
+  }
+
+  async queryHandouts(f) {
+    await tick();
+    const key = { date: 'HandoutDate', person: 'PersonnelName', product: 'Title', location: 'LocationName' }[f.sort] || 'HandoutDate';
+    const rows = this.filterHandouts(f).sort((a, b) =>
+      (String(a[key] || '').localeCompare(String(b[key] || '')) * (f.asc ? 1 : -1)) ||
+      String(b.HandoutDate).localeCompare(String(a.HandoutDate)) || b.id - a.id);
+    return {
+      rows: clone(rows.slice(f.offset, f.offset + f.limit).map(({ Signature, ...rest }) => rest)),
+      total: rows.length,
+    };
+  }
+
+  async handoutSummary(f) {
+    await tick();
+    const m = new Map();
+    for (const h of this.filterHandouts(f)) {
+      const k = `${h.Title}|${h.Size}`;
+      const s = m.get(k) || { Title: h.Title, Size: h.Size, Quantity: 0, Records: 0 };
+      s.Quantity += h.Quantity; s.Records += 1;
+      m.set(k, s);
+    }
+    return [...m.values()];
+  }
+
+  async dashboardStats(f) {
+    await tick();
+    const rows = this.filterHandouts({ locationIds: f.locationIds, from: f.from, to: f.to });
+    const group = (keyOf, make) => {
+      const m = new Map();
+      for (const r of rows) {
+        const k = keyOf(r);
+        const g = m.get(k) || make(r);
+        g.qty += r.Quantity;
+        m.set(k, g);
+      }
+      return [...m.values()].sort((a, b) => b.qty - a.qty);
+    };
+    const bucketOf = iso => {
+      const d = new Date(iso);
+      const start = f.bucket === 'week'
+        ? new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7))
+        : new Date(d.getFullYear(), d.getMonth(), 1);
+      return start.toLocaleDateString('sv-SE');
+    };
+    return {
+      items: rows.reduce((a, r) => a + r.Quantity, 0),
+      records: rows.length,
+      people: new Set(rows.map(r => r.PersonnelId)).size,
+      by_period: group(r => bucketOf(r.HandoutDate), r => ({ bucket: bucketOf(r.HandoutDate), qty: 0 })).sort((a, b) => a.bucket.localeCompare(b.bucket)),
+      by_product: group(r => r.ProductId, r => ({ product_id: r.ProductId, title: r.Title, qty: 0 })),
+      by_location: group(r => r.LocationId, r => ({ location_id: r.LocationId, location_name: r.LocationName, qty: 0 })),
+      by_reason: group(r => r.Reason || '—', r => ({ reason: r.Reason || '—', qty: 0 })),
+    };
+  }
+
+  async recentHandouts(personId, productIds, since) {
+    await tick();
+    return clone(this.rows('handouts')
+      .filter(h => h.PersonnelId === personId && productIds.includes(h.ProductId) && h.HandoutDate >= since)
+      .sort((a, b) => b.HandoutDate.localeCompare(a.HandoutDate))
+      .map(({ Signature, ...rest }) => rest));
+  }
+
+  async getHandoutBatch(batchId) {
+    await tick();
+    return clone(this.rows('handouts').filter(h => h.BatchId === batchId));
+  }
+
+  async exchangeHandout(id, newSize, quantity, locationId) {
+    return this.transaction(() => {
+      const h = this.find('handouts', id);
+      if (!h) throw new Error('Handout not found');
+      if (!newSize || newSize === h.Size) throw new Error('Choose a different size');
+      if (!(quantity >= 1 && quantity <= h.Quantity)) throw new Error(`Quantity must be between 1 and ${h.Quantity}`);
+      const loc = this.find('locations', locationId);
+      this.ctx = { source: 'Size exchange', note: `${h.PersonnelName}: ${h.Size} → ${newSize}` };
+      this.adjust(h.ProductId, newSize, locationId, -quantity, false);
+      this.adjust(h.ProductId, h.Size, locationId, quantity, true);
+      const note = `Size exchanged ${h.Size} → ${newSize} (${quantity} pcs) at ${loc.Title} on ${new Date().toISOString().slice(0, 10)} by ${this.user.name}`;
+      const notes = [h.Notes, note].filter(Boolean).join('\n');
+      if (quantity === h.Quantity) {
+        Object.assign(h, { Size: newSize, Notes: notes });
+      } else {
+        h.Quantity -= quantity;
+        this.rows('handouts').push({ ...h, id: ++this.data.nextId, Size: newSize, Quantity: quantity, Notes: notes });
+      }
+    });
+  }
+
   async deleteHandout(id, returnToStock) {
     return this.transaction(() => {
       const h = this.find('handouts', id);
       if (!h) return;
+      this.ctx = { source: 'Handout deleted', note: `Returned from ${h.PersonnelName || 'unknown'}` };
       if (returnToStock && h.LocationId && h.ProductId) this.adjust(h.ProductId, h.Size, h.LocationId, h.Quantity, true);
       this.data.tables.handouts = this.rows('handouts').filter(r => r.id !== id);
     });
@@ -126,7 +246,22 @@ export class DemoDb {
     if (!allowNegative && row.Quantity + delta < 0) {
       throw new Error(`Not enough stock of ${this.find('products', productId).Title} (${size}) at ${this.find('locations', locationId).Title}. Available: ${row.Quantity}.`);
     }
-    row.Quantity += delta;
+    this.setQuantity(row, row.Quantity + delta);
+  }
+
+  // Changes a stock row and writes the stock log entry (like the database trigger).
+  setQuantity(row, quantity) {
+    const old = row.Quantity;
+    if (old === quantity) return;
+    row.Quantity = quantity;
+    const ctx = this.ctx || {};
+    this.rows('stock_log').push({
+      id: ++this.data.nextId, ChangedAt: new Date().toISOString(),
+      ProductId: row.ProductId, ProductTitle: (this.find('products', row.ProductId) || {}).Title, Size: row.Size,
+      LocationId: row.LocationId, LocationName: (this.find('locations', row.LocationId) || {}).Title,
+      OldQuantity: old, NewQuantity: quantity, Change: quantity - old,
+      Source: ctx.source || 'Other', Note: ctx.note || null, ChangedBy: this.user.name, ChangedByEmail: this.user.email,
+    });
   }
 
   reset() {
@@ -154,7 +289,7 @@ function write(data) {
 
 function seed() {
   let id = 0;
-  const t = { locations: [], products: [], stock: [], personnel: [], handouts: [], transfers: [] };
+  const t = { locations: [], products: [], stock: [], personnel: [], handouts: [], transfers: [], stock_log: [] };
   const add = (table, f) => { const row = { ...f, id: ++id }; t[table].push(row); return row; };
 
   const locs = [['CPH', 'DK'], ['FRD2A', 'DK'], ['Kungsgarden', 'SE'], ['Ersbo', 'SE'], ['Stackbo', 'SE']]
@@ -177,7 +312,14 @@ function seed() {
     for (const p of products) {
       for (const size of p.Sizes.split(',').map(s => s.trim())) {
         const q = Math.floor(rnd() * 12);
-        if (q) add('stock', { ProductId: p.id, Size: size, LocationId: loc.id, Quantity: q });
+        if (!q) continue;
+        add('stock', { ProductId: p.id, Size: size, LocationId: loc.id, Quantity: q });
+        add('stock_log', {
+          ChangedAt: new Date(Date.now() - (60 + Math.floor(rnd() * 60)) * 86400000).toISOString(),
+          ProductId: p.id, ProductTitle: p.Title, Size: size, LocationId: loc.id, LocationName: loc.Title,
+          OldQuantity: 0, NewQuantity: q, Change: q, Source: 'Manual edit', Note: 'Initial stock count',
+          ChangedBy: 'Demo User', ChangedByEmail: 'demo@example.com',
+        });
       }
     }
   }
@@ -188,6 +330,9 @@ function seed() {
   ].map(([Title, Company, li]) => add('personnel', {
     Title, Company, Email: Title.toLowerCase().replace(/\s+/g, '.') + '@example.com', Phone: '', EmployeeNo: '',
     LocationId: locs[li].id, LocationName: locs[li].Title, Active: true,
+    BootsSize: String(40 + Math.floor(rnd() * 7)), JacketSize: ['M', 'L', 'XL', '2XL'][Math.floor(rnd() * 4)],
+    TrouserSize: ['M', 'L', 'XL'][Math.floor(rnd() * 3)], VestSize: ['L', 'XL', '2XL'][Math.floor(rnd() * 3)],
+    GlovesSize: String(8 + Math.floor(rnd() * 3)),
   }));
 
   const day = 86400000;
@@ -201,6 +346,22 @@ function seed() {
   hand(people[0], products[3], 'OneSize', 110, 'New Issue');
   hand(people[0], products[2], 'L', 20, 'Replacement - Worn Out', 'Old vest torn');
   hand(people[1], products[2], 'S', 45, 'Other', 'Management vest: HSE Lead');
+
+  // Older sample history spread over 18 months and all locations, for the History screen.
+  const reasons = ['New Issue', 'Replacement - Worn Out', 'Replacement - Damaged', 'Replacement - Lost', 'Size Change', 'Project Requirement'];
+  for (let i = 0; i < 600; i++) {
+    const person = people[Math.floor(rnd() * people.length)];
+    const product = products[Math.floor(rnd() * products.length)];
+    const sizes = product.Sizes.split(',').map(s => s.trim());
+    const loc = locs[Math.floor(rnd() * locs.length)];
+    add('handouts', {
+      Title: product.Title, BatchId: `demo-h${i}`, PersonnelId: person.id, PersonnelName: person.Title,
+      ProductId: product.id, Size: sizes[Math.floor(rnd() * sizes.length)], Quantity: 1 + Math.floor(rnd() * 2),
+      LocationId: loc.id, LocationName: loc.Title, Reason: reasons[Math.floor(rnd() * reasons.length)], Notes: '',
+      HandoutDate: new Date(Date.now() - Math.floor(rnd() * 540 * day)).toISOString(),
+      HandedOutBy: 'Demo User', HandedOutByEmail: 'demo@example.com', Signature: '',
+    });
+  }
 
   return { nextId: id, tables: t };
 }
