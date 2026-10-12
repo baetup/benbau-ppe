@@ -10,7 +10,7 @@ const PERIODS = [
 ];
 const WEEKLY = new Set(['30', '90', 'month', 'lastmonth']);
 
-const dash = { country: null, locationId: 'all', period: '365', problemsOnly: false, seq: 0 };
+const dash = { country: null, locationId: 'all', period: '365', problemsOnly: false, stockCat: 'regular', seq: 0 };
 
 // ctx: { svc, state, COUNTRIES, countryName, periodRange, lowStock, showHandoutHistory(productId, filters) }
 export function dashboardView(ctx) {
@@ -100,9 +100,10 @@ export function dashboardView(ctx) {
 
     const items = Number(stats.items) || 0;
     const periodLabel = (PERIODS.find(([v]) => v === dash.period) || [, ''])[1].toLowerCase();
-    const stockSection = h('section', { class: 'card dash-card dash-wide', id: 'dash-stock' });
+    const stockSection = h('section', { class: 'card dash-card dash-stock', id: 'dash-stock' });
 
     body.replaceChildren(
+      stockSection,
       h('div', { class: 'stat-row' },
         statTile('Items handed out', items, `${Number(stats.records).toLocaleString()} handouts · ${Number(stats.people).toLocaleString()} people · ${periodLabel}`),
         statTile('Items in stock now', inStock, `${locs.length} location${locs.length === 1 ? '' : 's'}`),
@@ -131,8 +132,7 @@ export function dashboardView(ctx) {
         dash.locationId === 'all' ? h('section', { class: 'card dash-card' },
           h('h3', null, 'By reason'),
           h('p', { class: 'muted small' }, 'Items handed out'),
-          stats.by_reason.length ? barList(stats.by_reason.map(r => ({ label: r.reason, value: Number(r.qty) }))) : h('p', { class: 'muted small' }, 'No handouts in this period.')) : null,
-        stockSection));
+          stats.by_reason.length ? barList(stats.by_reason.map(r => ({ label: r.reason, value: Number(r.qty) }))) : h('p', { class: 'muted small' }, 'No handouts in this period.')) : null));
 
     drawStock();
 
@@ -144,7 +144,13 @@ export function dashboardView(ctx) {
 
     function drawStock() {
       const problem = c => c.out > 0 || c.low > 0;
-      const rows = products.filter(p => !dash.problemsOnly || locs.some(l => problem(cells.get(`${p.id}|${l.id}`))));
+      const inCat = p => svc.categoryOf(p) === dash.stockCat;
+      const rows = products.filter(p => inCat(p) && (!dash.problemsOnly || locs.some(l => problem(cells.get(`${p.id}|${l.id}`)))));
+      const problemsIn = cat => products.filter(p => svc.categoryOf(p) === cat && locs.some(l => problem(cells.get(`${p.id}|${l.id}`)))).length;
+      const tabs = h('div', { class: 'segmented wide' }, [['regular', 'Regular PPE'], ['consumable', 'Consumables']].map(([cat, label]) => h('button', {
+        class: 'seg-btn' + (dash.stockCat === cat ? ' active' : ''), type: 'button',
+        onclick: () => { if (dash.stockCat !== cat) { dash.stockCat = cat; drawStock(); } },
+      }, label, problemsIn(cat) ? h('span', { class: 'seg-count warn' }, String(problemsIn(cat))) : null)));
       const toggle = h('label', { class: 'check-row' },
         h('input', { type: 'checkbox', checked: dash.problemsOnly, onchange: e => { dash.problemsOnly = e.target.checked; drawStock(); } }),
         'Only out of stock / running low');
@@ -161,7 +167,7 @@ export function dashboardView(ctx) {
       else if (!rows.length) content = emptyState('check', dash.problemsOnly ? 'Nothing out of stock or low' : 'No products', dash.problemsOnly ? 'All carried sizes are above the low-stock level.' : '');
       else if (locs.length === 1) content = singleLocationStock(rows, locs[0]);
       else content = stockMatrix(rows);
-      stockSection.replaceChildren(head, legend, content);
+      stockSection.replaceChildren(head, tabs, legend, content);
     }
 
     // One location: each product with every size as a chip.

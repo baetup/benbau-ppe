@@ -61,8 +61,46 @@ export class PpeService {
     return m;
   }
 
-  setStock(productId, size, locationId, quantity, note) {
-    return this.db.setStock(productId, size, locationId, quantity, note);
+  setStock(productId, size, locationId, quantity, note, returned) {
+    return this.db.setStock(productId, size, locationId, quantity, note, returned);
+  }
+
+  // Stock of one location: { qty: Map "productId|size" -> quantity, returned: Map -> returned (used) part }
+  async getStockFull(locationId) {
+    const rows = await this.db.list('stock', { LocationId: locationId });
+    const qty = new Map(), returned = new Map();
+    for (const r of rows) {
+      const k = `${r.ProductId}|${r.Size}`;
+      qty.set(k, (qty.get(k) || 0) + (Number(r.Quantity) || 0));
+      returned.set(k, (returned.get(k) || 0) + (Number(r.ReturnedQuantity) || 0));
+    }
+    return { qty, returned };
+  }
+
+  // ---------- worker status, returns, lost / rotation PPE ----------
+  isMainCompany(company) { return !!this.mainCompany && (company || '').trim().toLowerCase() === this.mainCompany.toLowerCase(); }
+  // 'active' (on site), 'rotation' or 'left'. Rotation only exists for subcontractor workers.
+  statusOf(p) { return p.Active === false ? 'left' : (p.InRotation && !this.isMainCompany(p.Company) ? 'rotation' : 'active'); }
+  setPersonStatus(p, status) {
+    return this.savePerson({
+      id: p.id, Active: status !== 'left', InRotation: status === 'rotation', StatusChangedAt: new Date().toISOString(),
+    });
+  }
+  recordReturn(personId, locationId, items, note) { return this.db.recordReturn(personId, locationId, items, note); }
+  returnsFor(personId) { return this.db.list('returns', { PersonnelId: personId }); }
+  outstandingPpe(country, status) { return this.db.outstandingPpe(country, status, this.mainCompany); }
+
+  // ---------- categories & orders ----------
+  categoryOf(p) { return p && p.Category === 'consumable' ? 'consumable' : 'regular'; }
+  // Use per product/size at a location over the last `months` months: { first: Date|null, used: Map "pid|size" -> qty }
+  async stockUsage(locationId, months) {
+    const from = new Date();
+    from.setMonth(from.getMonth() - months);
+    const r = await this.db.stockUsage(locationId, from.toISOString());
+    return {
+      first: r.first_log ? new Date(r.first_log) : null,
+      used: new Map((r.rows || []).map(x => [`${x.product_id}|${x.size}`, Number(x.used) || 0])),
+    };
   }
 
   // Every stock row (all locations): Map "productId|size|locationId" -> quantity. Small: products × sizes × locations.
@@ -71,6 +109,22 @@ export class PpeService {
     for (const r of await this.db.list('stock')) m.set(`${r.ProductId}|${r.Size}|${r.LocationId}`, Number(r.Quantity) || 0);
     return m;
   }
+
+  // ---------- incidents ----------
+  // Filters: { locationIds, personId, type, action, branch, status, search, from, to, offset, limit }
+  queryIncidents(f) { return this.db.queryIncidents({ offset: 0, limit: 50, ...f }); }
+  getIncident(id) { return this.db.getIncident(id); }
+  saveIncident(data) {
+    const { id, ...fields } = data;
+    return id ? this.db.update('incidents', id, fields) : this.db.create('incidents', fields);
+  }
+  async deleteIncident(incident) {
+    await this.db.removeEvidence((incident.Evidence || []).map(e => e.path));
+    await this.db.remove('incidents', incident.id);
+  }
+  uploadEvidence(path, blob, type) { return this.db.uploadEvidence(path, blob, type); }
+  evidenceUrls(paths) { return this.db.evidenceUrls(paths); }
+  removeEvidence(paths) { return this.db.removeEvidence(paths); }
 
   // Dashboard numbers. Filters: { locationIds, from, to, bucket: 'week' | 'month' }
   dashboardStats(f) { return this.db.dashboardStats(f); }

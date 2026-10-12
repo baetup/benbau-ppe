@@ -4,8 +4,9 @@
 
 const TABLES = {
   locations: 'locations', products: 'products', stock: 'stock',
-  personnel: 'personnel', handouts: 'handouts', transfers: 'transfers',
+  personnel: 'personnel', handouts: 'handouts', transfers: 'transfers', incidents: 'incidents', returns: 'returns',
 };
+const INCIDENT_COLUMNS = 'id,incident_date,personnel_id,personnel_name,branch,location_id,location_name,type,description,action_taken,breach_count,reported_by,witnesses,status,follow_up,closed_at,closed_by,evidence,created_by,created_at';
 const PAGE = 1000;
 const HISTORY_COLUMNS = 'id,batch_id,personnel_id,personnel_name,product_id,title,size,quantity,location_id,location_name,reason,notes,handout_date,handed_out_by';
 const SORT_COLUMNS = { date: 'handout_date', person: 'personnel_name', product: 'title', location: 'location_name' };
@@ -38,8 +39,26 @@ export class SupabaseDb {
     check(await this.sb.from(TABLES[table]).delete().eq('id', id));
   }
 
-  async setStock(productId, size, locationId, quantity, note) {
-    check(await this.sb.rpc('set_stock', { p_product_id: productId, p_size: size, p_location_id: locationId, p_quantity: quantity, p_note: note || null }));
+  async setStock(productId, size, locationId, quantity, note, returned) {
+    check(await this.sb.rpc('set_stock', {
+      p_product_id: productId, p_size: size, p_location_id: locationId, p_quantity: quantity,
+      p_note: note || null, p_returned: returned == null ? null : returned,
+    }));
+  }
+
+  // items: [{ handoutId, qty, toStock }]
+  async recordReturn(personId, locationId, items, note) {
+    check(await this.sb.rpc('record_return', { p_personnel_id: personId, p_location_id: locationId, p_items: items, p_note: note || null }));
+  }
+
+  // Orders: { first_log, rows: [{ product_id, size, used }] }
+  async stockUsage(locationId, from) {
+    return check(await this.sb.rpc('stock_usage', { p_location_id: locationId, p_from: from }));
+  }
+
+  // Lost / rotation PPE: [{ personnel_id, personnel_name, company, location_name, product_id, title, size, quantity, last_handout }]
+  async outstandingPpe(country, status, excludeCompany) {
+    return check(await this.sb.rpc('outstanding_ppe', { p_country: country, p_status: status, p_exclude_company: excludeCompany || null }));
   }
 
   // History: one page of the stock change log, plus the total count.
@@ -95,6 +114,46 @@ export class SupabaseDb {
       p_search: f.search, p_from: f.from, p_to: f.to,
     }));
     return rows.map(fromDb);
+  }
+
+  // ---------- incidents ----------
+  // One page of incidents matching the filters (without the signature), plus the total count.
+  async queryIncidents(f) {
+    if (f.locationIds && !f.locationIds.length) return { rows: [], total: 0 };
+    let q = this.sb.from('incidents').select(INCIDENT_COLUMNS, { count: 'exact' });
+    if (f.locationIds) q = q.in('location_id', f.locationIds);
+    if (f.personId) q = q.eq('personnel_id', f.personId);
+    if (f.type) q = q.eq('type', f.type);
+    if (f.action) q = q.eq('action_taken', f.action);
+    if (f.branch) q = q.eq('branch', f.branch);
+    if (f.status) q = q.eq('status', f.status);
+    if (f.search) q = q.ilike('personnel_name', `%${f.search}%`);
+    if (f.from) q = q.gte('incident_date', f.from);
+    if (f.to) q = q.lt('incident_date', f.to);
+    q = q.order('incident_date', { ascending: false }).order('id', { ascending: false }).range(f.offset, f.offset + f.limit - 1);
+    const { data, error, count } = await q;
+    check({ data, error });
+    return { rows: data.map(fromDb), total: count || 0 };
+  }
+
+  async getIncident(id) {
+    return fromDb(check(await this.sb.from('incidents').select('*').eq('id', id).single()));
+  }
+
+  // Evidence files live in the private "evidence" storage bucket.
+  async uploadEvidence(path, blob, contentType) {
+    check(await this.sb.storage.from('evidence').upload(path, blob, { contentType, upsert: false }));
+  }
+
+  // Temporary (1 hour) links to view evidence files. Returns Map path -> url.
+  async evidenceUrls(paths) {
+    if (!paths.length) return new Map();
+    const data = check(await this.sb.storage.from('evidence').createSignedUrls(paths, 3600));
+    return new Map(data.filter(d => d.signedUrl).map(d => [d.path, d.signedUrl]));
+  }
+
+  async removeEvidence(paths) {
+    if (paths.length) check(await this.sb.storage.from('evidence').remove(paths));
   }
 
   // Dashboard: totals, items per week/month, per product, per location and per reason.

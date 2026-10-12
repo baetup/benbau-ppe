@@ -18,6 +18,25 @@ window.PPE_CONFIG = {
     { code: "SE", name: "Sweden" }
   ],
 
+  // The main company. Its workers have no rotation status and are left out of the lost / rotation PPE reports.
+  mainCompany: "Benbau",
+
+  // Orders tab suggestion:
+  //   suggested = average use per month (last historyMonths) × coverMonths + workers with that size × workerBuffer − stock
+  orderSettings: {
+    historyMonths: 3,   // how far back to look at use (handouts + stock decreases from counts)
+    coverMonths: 2,     // how many months the order should last
+    workerBuffer: 0.1   // spare per worker with that size (0.1 = 10%)
+  },
+
   // Dashboard: a size counts as "running low" when this many or fewer are left
-  lowStock: 2
+  lowStock: 2,
+
+  // Incidents tab on/off. false = hidden (nothing is deleted); set to true to show it again.
+  incidentsEnabled: false,
+
+  // Incidents: the choices in the incident form (edit freely; order = order in the lists)
+  incidentTypes: ["Health and Safety", "Quality", "Other Policy"],
+  incidentActions: ["General NCR", "Verbal Coaching", "Yellow Card", "Red Card"],
+  branches: ["Benbau", "HIROS", "Dipwork", "Nortabyg", "TSI"]
 };

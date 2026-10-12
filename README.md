@@ -94,6 +94,60 @@ Open the address on the phone. On iPhone: Share → **Add to Home Screen**. On A
   country of their site; people without a site show in every country.
 - Products are shared. Stock is kept per location. Transfers can go to any location.
 
+### Worker status, returns, lost & rotation PPE (Personnel tab)
+- **Status** on each worker's card: **On site**, **In rotation** or **Left**. Rotation only exists for
+  subcontractors; workers of `mainCompany` (config.js, "Benbau") are only Active / Left.
+- **Return PPE** (worker card): shows everything the worker still holds. Enter how many came back,
+  where, and whether it goes **back in stock** (as returned PPE) or is discarded (damaged). Each return is
+  recorded, and the handout card shows "Returned 1 of 2". Setting a worker to Left offers to record returns.
+- **Crews & rotation**: all subcontractor workers of the selected country, grouped by company. One tap
+  sets On site / In rotation / Left. Tick several workers (or a whole company) for bulk changes.
+- **Lost / rotation**: per country, PPE still held by subcontractor workers who **left** (lost) or are
+  **in rotation**, per company → equipment → size, with the list of workers. Export CSV.
+  Products with "Track returns" off (consumables such as gloves) are not counted.
+- The worker's company decides all of this. Choose it from the list in the person's profile (✎ Edit).
+
+### Returned stock
+- Stock shows how many items are returned (used) PPE: "5 in stock · 2 returned".
+- In the handout form each item has a **Returned PPE** tickbox. Ticked = taken from returned stock.
+- Manual corrections: product **Edit** → each size has "in stock" and "returned".
+
+### Regular PPE and consumables
+Every product is **Regular PPE** (jackets, trousers, boots…) or a **Consumable** (gloves, ear plugs, knee
+pads…), set in the product's Edit form. Inventory, Orders and the Dashboard's Stock check each have a tab
+for both. Consumables are never counted as lost / rotation PPE.
+
+### Orders tab (per location)
+- Two tabs (Regular PPE / Consumables), one collapsible card per product, per size:
+  **Workers** (active workers at the site with that size on their profile; one-size products count every
+  worker), **In stock**, **Used / month** and **Suggested order**.
+- Suggested order = average use per month × `coverMonths` + `workerBuffer` × workers with that size − stock
+  (`orderSettings` in config.js). "Use" comes from the stock change log: handouts plus stock decreases
+  from manual counts, which is how consumables are counted. The more history, the better the suggestion.
+- Link a product to a worker size in product **Edit** → "Matches worker size".
+
+### Incidents tab (events, NCRs, policy violations)
+**Currently hidden.** Set `incidentsEnabled: true` in `config.js` to show the tab and the incident line on
+the Personnel cards. The database table and evidence storage stay in place either way.
+
+- **Report incident:** pick the worker from the personnel list (or add a new person), then fill in the
+  date, branch (filled in from the person's company), location, type, description, action taken, reported
+  by and witnesses.
+- **Times policy was breached** is filled in automatically: the worker's earlier incidents of the same type
+  + 1. You can change it. The form also lists the worker's earlier incidents, so you can see when to
+  escalate (Verbal Coaching → Yellow Card → Red Card).
+- **Evidence:** add photos (taken with the phone camera or chosen from the gallery) and PDFs. Photos are
+  resized automatically. Files are stored in a private Supabase storage bucket that only staff can open.
+- **Worker acknowledgement:** optional signature.
+- **Status:** Open or Closed, with a follow-up / corrective action note (**Close** button in the detail view).
+- **Print / PDF:** a printable report including the photos. Choose "Save as PDF" in the print dialog.
+- **Filters** (country, location, type, action, branch, status, period, person) and **Export CSV** in the
+  same columns as the old spreadsheet.
+- Each worker's **Personnel** card shows how many incidents they have, with links to view them or report a new one.
+- The lists are set in `config.js`: `incidentTypes`, `incidentActions`, `branches`.
+- Storage: the free Supabase plan includes 1 GB of files. A resized photo is about 200–400 KB, so that's
+  roughly 3,000 photos.
+
 ### Dashboard tab
 Choose a **country**, **location** (or all) and **consumption period**:
 - **Tiles:** items handed out (with number of handouts and people), items in stock now, sizes out of

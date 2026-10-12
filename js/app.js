@@ -7,10 +7,14 @@ import { SupabaseDb } from './db-supabase.js';
 import { createSignaturePad } from './signature.js';
 import { buildReceiptHtml, receiptImage } from './receipt.js';
 import { dashboardView } from './dashboard.js';
+import { incidentsView, personIncidentsLine } from './incidents.js';
+import { statusControl, holdingsBox, crewsView, outstandingView } from './workforce.js';
+import { ordersView } from './orders.js';
 
 const cfg = Object.assign({ appName: 'Benbau PPE Tracker' }, window.PPE_CONFIG || {});
 const demo = !cfg.supabaseUrl || !cfg.supabaseKey || new URLSearchParams(location.search).has('demo');
-const COUNTRIES = (cfg.countries && cfg.countries.length) ? cfg.countries : [{ code: 'DK', name: 'Denmark' }];
+const incidentsOn = cfg.incidentsEnabled === true;   // Incidents tab is hidden unless switched on in config.js
+const COUNTRIES =(cfg.countries && cfg.countries.length) ? cfg.countries : [{ code: 'DK', name: 'Denmark' }];
 // Clothing sizes stored on each person's profile: [field, label, placeholder]
 const PERSON_SIZES = [
   ['BootsSize', 'Boots', 'e.g. 43'],
@@ -37,10 +41,12 @@ const state = {
   personId: prefs.personId || null,
   cart: prefs.cart || [],             // [{ productId, size, qty }]
   cartLocationId: prefs.cartLocationId || null,
+  invCategory: prefs.invCategory === 'consumable' ? 'consumable' : 'regular',   // Inventory sub-tab
   search: '',
   sizeSel: {},                        // productId -> selected size
   qty: {},                            // productId -> stepper value
-  stock: new Map(), stockLoc: null,   // stock map for stockLoc
+  stock: new Map(), stockReturned: new Map(), stockLoc: null,   // stock (and returned part) for stockLoc
+  personnelMode: 'worker',            // Personnel tab: 'worker' | 'crews' | 'outstanding'
   handouts: [], handoutsFor: null,
   hFilterProduct: 'all', hFilterPeriod: 'all',
 };
@@ -49,6 +55,7 @@ function savePrefs() {
   try {
     localStorage.setItem(PREF_KEY, JSON.stringify({
       tab: state.tab, country: state.country, locationId: state.locationId, personId: state.personId, cart: state.cart, cartLocationId: state.cartLocationId,
+      invCategory: state.invCategory,
     }));
   } catch { /* storage unavailable */ }
 }
@@ -86,6 +93,7 @@ async function boot() {
     renderLoading('Loading data…');
     svc = new PpeService(db, user);
     svc.defaultCountry = COUNTRIES[0].code;
+    svc.mainCompany = cfg.mainCompany || 'Benbau';
     await svc.loadBase();
     startApp();
   } catch (e) {
@@ -247,7 +255,9 @@ function renderShell() {
           tabButton('dashboard', 'Dashboard', 'chart'),
           tabButton('inventory', 'Inventory', 'package'),
           tabButton('personnel', 'Personnel', 'users'),
-          tabButton('history', 'History', 'clock')),
+          tabButton('history', 'History', 'clock'),
+          tabButton('orders', 'Orders', 'clipboard'),
+          incidentsOn ? tabButton('incidents', 'Incidents', 'shield') : null),
         COUNTRIES.length > 1 ? h('button', { class: 'country-btn', title: `Country: ${countryName(state.country)}`, onclick: chooseCountry },
           icon('globe'), state.country, icon('chevronDown', 'chev')) : null,
         h('button', { class: 'avatar-btn', title: svc.user.name, onclick: openUserMenu }, initials))),
@@ -280,6 +290,8 @@ function renderView() {
       showHandoutHistory,
     }),
   };
+  views.orders = () => ordersView(workforceCtx());
+  if (incidentsOn) views.incidents = () => incidentsView(incidentCtx());
   view.replaceChildren((views[state.tab] || views.dashboard)());
 }
 
@@ -333,14 +345,22 @@ function inventoryView() {
     if (state.stockLoc !== state.locationId) loadStock(); else fillProductList();
   });
 
+  const catBtn = (cat, label) => h('button', {
+    class: 'seg-btn' + (state.invCategory === cat ? ' active' : ''), type: 'button',
+    onclick: () => { if (state.invCategory !== cat) { state.invCategory = cat; savePrefs(); renderView(); } },
+  }, label, h('span', { class: 'seg-count' }, String(svc.activeProducts().filter(p => svc.categoryOf(p) === cat).length)));
+  const consumable = state.invCategory === 'consumable';
+
   return h('div', { class: 'inventory' },
     h('div', { class: 'toolbar' },
       h('label', { class: 'location-pill' }, icon('pin'), locSelect, icon('chevronDown', 'chev')),
       h('button', { class: 'btn btn-outline cart-btn', 'aria-label': 'Cart', onclick: openCart }, icon('cart'), h('span', { class: 'badge', id: 'cart-badge' }))),
+    h('div', { class: 'segmented wide' }, catBtn('regular', 'Regular PPE'), catBtn('consumable', 'Consumables')),
     h('div', { class: 'toolbar' },
       h('label', { class: 'search' }, icon('search'),
-        h('input', { type: 'search', placeholder: 'Search products…', value: state.search, oninput: e => { state.search = e.target.value; fillProductList(); } })),
-      h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(null) }, icon('plus'), h('span', { class: 'hide-sm' }, 'New product'))),
+        h('input', { type: 'search', placeholder: consumable ? 'Search consumables…' : 'Search PPE…', value: state.search, oninput: e => { state.search = e.target.value; fillProductList(); } })),
+      h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(null, state.invCategory) }, icon('plus'),
+        h('span', { class: 'hide-sm' }, consumable ? 'New consumable' : 'New PPE item'))),
     h('div', { class: 'product-grid', id: 'product-list' }));
 }
 
@@ -366,9 +386,10 @@ async function loadStock() {
   }
   if (list) list.replaceChildren(h('div', { class: 'loading' }, h('div', { class: 'spinner' }), 'Loading stock…'));
   try {
-    const stock = await svc.getStock(locId);
+    const stock = await svc.getStockFull(locId);
     if (locId !== state.locationId) return;
-    state.stock = stock;
+    state.stock = stock.qty;
+    state.stockReturned = stock.returned;
     state.stockLoc = locId;
   } catch (e) {
     if (list) list.replaceChildren(errorBox(e, loadStock));
@@ -382,23 +403,28 @@ function errorBox(e, retry) {
 }
 
 const stockQty = (pid, size) => state.stock.get(`${pid}|${size}`) || 0;
+const returnedQty = (pid, size) => state.stockReturned.get(`${pid}|${size}`) || 0;
 const cartQty = (pid, size) => state.cart.filter(c => c.productId === pid && c.size === size).reduce((a, c) => a + c.qty, 0);
 
 function fillProductList() {
   const list = document.getElementById('product-list');
   if (!list) return;
   const q = state.search.trim().toLowerCase();
-  const hiddenCount = svc.products.length - svc.activeProducts().length;
+  const inCat = p => svc.categoryOf(p) === state.invCategory;
+  const hiddenCount = svc.products.filter(p => inCat(p) && p.Active === false).length;
   if (!hiddenCount) state.showHidden = false;
-  const prods = (state.showHidden ? svc.products : svc.activeProducts()).filter(p => !q || p.Title.toLowerCase().includes(q));
+  const prods = (state.showHidden ? svc.products : svc.activeProducts()).filter(p => inCat(p) && (!q || p.Title.toLowerCase().includes(q)));
   const toggle = hiddenCount ? h('button', {
     class: 'link-btn hidden-toggle', type: 'button',
     onclick: () => { state.showHidden = !state.showHidden; fillProductList(); },
   }, state.showHidden ? 'Hide hidden products' : `Show hidden products (${hiddenCount})`) : null;
+  const consumable = state.invCategory === 'consumable';
   if (!prods.length) {
     list.replaceChildren(q
       ? emptyState('search', 'No matching products', 'Try another search.')
-      : emptyState('package', 'No products yet', 'Add your first product with “New product”.'), ...(toggle ? [toggle] : []));
+      : emptyState('package', consumable ? 'No consumables yet' : 'No PPE items yet',
+          consumable ? 'Add gloves, ear plugs, knee pads… with “New consumable”.' : 'Add jackets, trousers, boots… with “New PPE item”.'),
+      ...(toggle ? [toggle] : []));
     return;
   }
   list.replaceChildren(...prods.map(productCard), ...(toggle ? [toggle] : []));
@@ -440,11 +466,13 @@ function productCard(p) {
         hidden ? h('span', { class: 'tag tag-grey' }, 'Hidden — open Edit to show it again') : null),
       h('div', { class: 'pc-counts' },
         h('div', { class: 'count-stock' + (inStock <= 0 ? ' zero' : '') }, inStock), h('div', { class: 'count-label' }, 'in stock'),
+        returnedQty(p.id, size) ? h('div', { class: 'count-returned' }, `${returnedQty(p.id, size)} returned`) : null,
         h('div', { class: 'count-cart' }, inCart), h('div', { class: 'count-label' }, 'in cart'))),
     field('Size / variant', h('select', {
       class: 'input', value: size,
       onchange: e => { state.sizeSel[p.id] = e.target.value; refreshCard(p.id); },
-    }, sizes.map(s => h('option', { value: s }, `${s}   (${stockQty(p.id, s)} in stock)`)))),
+    }, sizes.map(s => h('option', { value: s },
+      `${s}   (${stockQty(p.id, s)} in stock${returnedQty(p.id, s) ? ` · ${returnedQty(p.id, s)} returned` : ''})`)))),
     h('div', { class: 'pc-actions' },
       h('div', { class: 'stepper' },
         h('button', { type: 'button', 'aria-label': 'Less', onclick: () => step(-1) }, icon('minus')),
@@ -529,6 +557,25 @@ function itemsSummary() {
     state.cart.map(c => h('div', null, `${c.qty} × ${svc.product(c.productId).Title} — ${c.size}`)));
 }
 
+// Handout items with a "Returned PPE" tickbox per item. returned(i) = how many of cart item i come from returned stock.
+function handoutItems() {
+  const boxes = state.cart.map(c => {
+    const avail = returnedQty(c.productId, c.size);
+    return h('input', { type: 'checkbox', disabled: !avail });
+  });
+  const el = h('div', { class: 'items-summary' },
+    h('div', { class: 'field-label' }, `Items (${cartCount()}) from ${svc.locName(state.locationId)}`),
+    state.cart.map((c, i) => {
+      const avail = returnedQty(c.productId, c.size);
+      const use = Math.min(avail, c.qty);
+      return h('div', { class: 'handout-item' },
+        h('span', null, `${c.qty} × ${svc.product(c.productId).Title} — ${c.size}`),
+        h('label', { class: 'check-row small' + (avail ? '' : ' muted') }, boxes[i],
+          avail ? (use < c.qty ? `Returned PPE (${use} of ${c.qty}, ${avail} available)` : `Returned PPE (${avail} available)`) : 'Returned PPE (none in stock)'));
+    }));
+  return { el, returned: i => (boxes[i].checked ? Math.min(returnedQty(state.cart[i].productId, state.cart[i].size), state.cart[i].qty) : 0) };
+}
+
 function choosePerson(selectedId, includeInactive = false) {
   const people = (includeInactive ? svc.personnel : svc.activePersonnel()).filter(inCountry);
   return pickFrom({
@@ -537,7 +584,7 @@ function choosePerson(selectedId, includeInactive = false) {
     items: people.map(p => ({
       id: p.id, label: p.Title,
       sub: [p.LocationName || svc.locName(p.LocationId), p.Company].filter(Boolean).join(' · '),
-      badge: p.Active === false ? 'Inactive' : null,
+      badge: { left: 'Left', rotation: 'In rotation' }[svc.statusOf(p)] || null,
     })),
     addLabel: 'Add new person',
     onAdd: () => openPersonEditor(null),
@@ -586,6 +633,7 @@ function openHandout(cartModal) {
     sizesBox.hidden = false;
     checkRecent(p);
   };
+  const items = handoutItems();
 
   const m = openModal({
     title: 'Handout PPE', iconName: 'user', iconClass: 'c-brand', persistent: true,
@@ -593,12 +641,12 @@ function openHandout(cartModal) {
       field('Personnel', personButton(null, onPerson)),
       sizesBox,
       warningBox,
+      items.el,
       field('Reason', reason),
       field('Notes', notes),
       field('Date', date),
       field('Receiver signature', sig.el),
-      receiptRow,
-      itemsSummary()),
+      receiptRow),
     footer: h('button', { class: 'btn btn-block btn-green', onclick: submit }, icon('check'), 'Complete handout'),
   });
 
@@ -614,7 +662,7 @@ function openHandout(cartModal) {
     }
     const showReceipt = receiptCb.checked;
     const rows = await busy('Saving handout…', () => svc.handout({
-      person, locationId: state.locationId, items: state.cart.map(c => ({ ...c })),
+      person, locationId: state.locationId, items: state.cart.map((c, i) => ({ ...c, returned: items.returned(i) })),
       reason: reason.value, notes: notes.value.trim(), date: dateInputToIso(date.value), signature: sig.toDataURL(),
     }));
     state.stockLoc = null;
@@ -676,25 +724,36 @@ function openTransfer(cartModal) {
 }
 
 // ---------- products ----------
-function openProductEditor(product) {
+function openProductEditor(product, newCategory = 'regular') {
   const isNew = !product;
-  const p = product || { Title: '', Sizes: 'S, M, L, XL, 2XL', ImageUrl: '', Active: true };
+  const p = product || { Title: '', Sizes: newCategory === 'consumable' ? 'OneSize' : 'S, M, L, XL, 2XL', ImageUrl: '', Active: true, Category: newCategory };
   const locId = state.locationId;
   const name = h('input', { class: 'input', value: p.Title || '' });
   const sizes = h('input', { class: 'input', value: p.Sizes || '', placeholder: 'e.g. S, M, L, XL or OneSize' });
   const image = h('input', { class: 'input', type: 'url', value: p.ImageUrl || '', placeholder: 'https://… (optional)' });
   const active = h('input', { type: 'checkbox', checked: p.Active !== false });
+  const sizeType = h('select', { class: 'input' }, h('option', { value: '' }, '— none —'), PERSON_SIZES.map(([, label]) => h('option', { value: label }, label)));
+  sizeType.value = p.SizeType || '';
+  const category = h('select', { class: 'input' },
+    h('option', { value: 'regular' }, 'Regular PPE (jackets, trousers, boots…)'),
+    h('option', { value: 'consumable' }, 'Consumable (gloves, ear plugs, knee pads…)'));
+  category.value = svc.categoryOf(p);
   const stockGrid = h('div', { class: 'stock-grid' });
-  const stockInputs = {};
+  // Returned (used) stock only matters for regular PPE.
+  const syncCategory = () => stockGrid.classList.toggle('no-returned', category.value === 'consumable');
+  category.addEventListener('change', syncCategory);
+  syncCategory();
+  const stockInputs = {};   // size -> { qty, ret } inputs
 
   function drawStock() {
-    const prev = Object.fromEntries(Object.entries(stockInputs).map(([s, inp]) => [s, inp.value]));
+    const prev = Object.fromEntries(Object.entries(stockInputs).map(([s, i]) => [s, { qty: i.qty.value, ret: i.ret.value }]));
     for (const k of Object.keys(stockInputs)) delete stockInputs[k];
     const list = parseSizes(sizes.value);
     stockGrid.replaceChildren(...(list.length ? list : ['OneSize']).map(s => {
-      const inp = h('input', { class: 'input', type: 'number', min: '0', inputmode: 'numeric', value: prev[s] ?? String(product ? stockQty(product.id, s) : 0) });
-      stockInputs[s] = inp;
-      return h('label', { class: 'stock-cell' }, h('span', null, s), inp);
+      const qty = h('input', { class: 'input', type: 'number', min: '0', inputmode: 'numeric', 'aria-label': `${s} in stock`, value: prev[s] ? prev[s].qty : String(product ? stockQty(product.id, s) : 0) });
+      const ret = h('input', { class: 'input input-sm', type: 'number', min: '0', inputmode: 'numeric', 'aria-label': `${s} of which returned`, title: 'Of which returned (used) PPE', value: prev[s] ? prev[s].ret : String(product ? returnedQty(product.id, s) : 0) });
+      stockInputs[s] = { qty, ret };
+      return h('label', { class: 'stock-cell' }, h('span', null, s), qty, h('span', { class: 'ret-label' }, 'returned'), ret);
     }));
   }
   sizes.addEventListener('input', drawStock);
@@ -702,14 +761,16 @@ function openProductEditor(product) {
   const stockNote = h('input', { class: 'input', list: 'stock-reasons', placeholder: 'e.g. Delivery received', autocomplete: 'off' });
 
   const m = openModal({
-    title: isNew ? 'New product' : 'Edit product', iconName: 'package', iconClass: 'c-brand', persistent: true,
+    title: isNew ? (newCategory === 'consumable' ? 'New consumable' : 'New PPE item') : 'Edit product', iconName: 'package', iconClass: 'c-brand', persistent: true,
     body: h('div', { class: 'form' },
       field('Product name *', name),
+      field('Category', category),
       field('Sizes / variants (comma separated)', sizes),
       field('Image URL', image),
+      field('Matches worker size (for Orders)', sizeType),
       locId ? h('div', { class: 'field' },
         h('span', { class: 'field-label' }, `Stock at ${svc.locName(locId)}`),
-        h('span', { class: 'muted small' }, 'Use this to register deliveries or correct counts. Every change is logged.'),
+        h('span', { class: 'muted small' }, 'Use this to register deliveries or correct counts. "returned" = how many of them are returned (used) PPE. Every change is logged.'),
         stockGrid) : null,
       locId ? field('Reason for stock change', h('div', null, stockNote,
         h('datalist', { id: 'stock-reasons' }, STOCK_REASONS.map(r => h('option', { value: r }))))) : null,
@@ -725,20 +786,21 @@ function openProductEditor(product) {
 
   async function save() {
     if (!name.value.trim()) return toast('Product name is required', 'error');
-    const changed = Object.entries(stockInputs).some(([s, inp]) =>
-      Math.max(0, parseInt(inp.value, 10) || 0) !== (product ? stockQty(product.id, s) : 0));
-    if (changed && !stockNote.value.trim()) return toast('Write a reason for the stock change', 'error');
+    const num = el => Math.max(0, parseInt(el.value, 10) || 0);
+    const edits = Object.entries(stockInputs).map(([s, i]) => ({
+      s, qty: num(i.qty), ret: Math.min(num(i.ret), num(i.qty)),
+      oldQty: product ? stockQty(product.id, s) : 0, oldRet: product ? returnedQty(product.id, s) : 0,
+    })).filter(e => e.qty !== e.oldQty || e.ret !== e.oldRet);
+    if (edits.length && !stockNote.value.trim()) return toast('Write a reason for the stock change', 'error');
     const r = await busy('Saving…', async () => {
       const saved = await svc.saveProduct({
         id: product && product.id, Title: name.value.trim(),
         Sizes: parseSizes(sizes.value).join(', ') || 'OneSize', ImageUrl: image.value.trim(), Active: active.checked,
+        // Consumables are never counted as lost / rotation PPE.
+        SizeType: sizeType.value || null, Category: category.value, Returnable: category.value === 'regular',
       });
       if (locId) {
-        for (const [s, inp] of Object.entries(stockInputs)) {
-          const qty = Math.max(0, parseInt(inp.value, 10) || 0);
-          const old = product ? stockQty(saved.id, s) : 0;
-          if (qty !== old) await svc.setStock(saved.id, s, locId, qty, stockNote.value.trim());
-        }
+        for (const e of edits) await svc.setStock(saved.id, e.s, locId, e.qty, stockNote.value.trim(), e.ret);
       }
       return saved;
     });
@@ -801,7 +863,31 @@ function openLocations() {
 // ---------- personnel ----------
 const PERIODS = [['all', 'All time'], ['30', 'Last 30 days'], ['90', 'Last 3 months'], ['365', 'Last 12 months']];
 
+// Everything the workforce (status / returns / reports) and orders modules need from the app.
+function workforceCtx() {
+  return {
+    svc, state, COUNTRIES, countryName, locationOptions, PERSON_SIZES,
+    rerender: renderView,
+    branches: cfg.branches || [],
+    mainCompany: svc.mainCompany,
+    orderSettings: Object.assign({ historyMonths: 3, coverMonths: 2, workerBuffer: 0.1 }, cfg.orderSettings || {}),
+    openWorker: id => { state.personId = id; state.personnelMode = 'worker'; state.hFilterProduct = 'all'; savePrefs(); goToTab('personnel'); },
+  };
+}
+
 function personnelView() {
+  const modeBtn = (mode, label) => h('button', {
+    class: 'seg-btn' + (state.personnelMode === mode ? ' active' : ''), type: 'button',
+    onclick: () => { if (state.personnelMode !== mode) { state.personnelMode = mode; renderView(); } },
+  }, label);
+  const modes = h('div', { class: 'segmented' },
+    modeBtn('worker', 'Worker'), modeBtn('crews', 'Crews & rotation'), modeBtn('outstanding', 'Lost / rotation'));
+  if (state.personnelMode === 'crews') return h('div', { class: 'personnel' }, modes, crewsView(workforceCtx()));
+  if (state.personnelMode === 'outstanding') return h('div', { class: 'personnel' }, modes, outstandingView(workforceCtx()));
+  return h('div', { class: 'personnel' }, modes, workerView());
+}
+
+function workerView() {
   const person = svc.person(state.personId);
   const bar = h('div', { class: 'toolbar' },
     h('button', {
@@ -818,22 +904,21 @@ function personnelView() {
     }, icon('userPlus')));
 
   if (!person) {
-    return h('div', { class: 'personnel' }, bar, emptyState('users', 'No person selected', 'Choose a person to see their PPE history, or add a new one.'));
+    return h('div', null, bar, emptyState('users', 'No person selected', 'Choose a person to see their PPE history, or add a new one.'));
   }
 
   const locName = person.LocationName || svc.locName(person.LocationId);
   const contact = [person.Email, person.Phone].filter(Boolean).join(' · ');
   queueMicrotask(() => { if (state.handoutsFor !== person.id) loadHandouts(person.id); else fillHandouts(); });
 
-  return h('div', { class: 'personnel' }, bar,
+  return h('div', null, bar,
     h('section', { class: 'card person-card' },
       h('div', { class: 'person-head' },
         h('div', null,
           h('h2', null, person.Title),
           h('div', { class: 'tags' },
             locName ? h('span', { class: 'tag' }, icon('pin'), locName) : null,
-            h('span', { class: 'tag ' + (person.Active !== false ? 'tag-green' : 'tag-grey') }, person.Active !== false ? 'Active' : 'Inactive'),
-            person.Company ? h('span', { class: 'tag' }, person.Company) : null,
+            person.Company ? h('span', { class: 'tag' }, person.Company) : h('span', { class: 'tag tag-amber' }, 'No company set'),
             person.EmployeeNo ? h('span', { class: 'tag' }, '#' + person.EmployeeNo) : null),
           contact ? h('div', { class: 'muted small' }, contact) : null),
         h('button', {
@@ -841,7 +926,10 @@ function personnelView() {
             if (await openPersonEditor(person)) renderView();
           }
         }, icon('edit'))),
+      statusControl(workforceCtx(), person),
+      h('div', { id: 'holdings' }),
       personSizes(person),
+      incidentsOn ? personIncidentsLine(incidentCtx(), person) : null,
       h('div', { class: 'filters', id: 'handout-filters' })),
     h('div', { class: 'muted small summary-line', id: 'handout-summary' }),
     h('div', { class: 'handout-list', id: 'handout-list' }));
@@ -881,6 +969,9 @@ function fillHandouts() {
   const list = document.getElementById('handout-list');
   const summary = document.getElementById('handout-summary');
   if (!list) return;
+  const holdings = document.getElementById('holdings');
+  const person = svc.person(state.personId);
+  if (holdings && person) holdings.replaceChildren(holdingsBox(workforceCtx(), person, state.handouts));
 
   const products = new Map();
   for (const x of state.handouts) if (!products.has(x.ProductId)) products.set(x.ProductId, x.Title);
@@ -911,6 +1002,9 @@ function handoutCard(x) {
     h('div', { class: 'hc-body' },
       h('div', { class: 'hc-title' }, x.Title),
       h('div', { class: 'small' }, `Size: ${x.Size} · Qty: ${x.Quantity}`),
+      x.ReturnedQuantity || x.FromReturned ? h('div', { class: 'tags' },
+        x.ReturnedQuantity ? h('span', { class: 'tag tag-green' }, x.ReturnedQuantity >= x.Quantity ? 'Returned' : `Returned ${x.ReturnedQuantity} of ${x.Quantity}`) : null,
+        x.FromReturned ? h('span', { class: 'tag' }, `${x.FromReturned} from returned stock`) : null) : null,
       h('div', { class: 'muted xsmall' }, `Handed out by ${x.HandedOutBy || '—'} on ${formatDate(x.HandoutDate)}${x.LocationName ? ' · ' + x.LocationName : ''}`),
       h('div', { class: 'small' }, h('b', null, 'Reason: '), x.Reason || '—'),
       x.Notes ? h('div', { class: 'small muted' }, h('b', null, 'Notes: '), x.Notes) : null,
@@ -929,9 +1023,12 @@ function openHandoutActions(x) {
   const locs = svc.locationsIn(state.country);
   const defaultLoc = locs.some(l => l.id === state.locationId) ? state.locationId : (locs[0] && locs[0].id);
 
+  const open = x.Quantity - (x.ReturnedQuantity || 0);   // items already returned can't be exchanged
   let exchange;
   if (!product) {
     exchange = h('p', { class: 'muted small' }, 'This product no longer exists, so the size cannot be exchanged.');
+  } else if (open <= 0) {
+    exchange = h('p', { class: 'muted small' }, 'All items of this handout have been returned.');
   } else if (!otherSizes.length) {
     exchange = h('p', { class: 'muted small' }, 'This product has only one size.');
   } else if (!locs.length) {
@@ -939,7 +1036,7 @@ function openHandoutActions(x) {
   } else {
     const sizeSel = h('select', { class: 'input' });
     const locSel = h('select', { class: 'input', value: String(defaultLoc), onchange: drawSizes }, locs.map(l => h('option', { value: String(l.id) }, l.Title)));
-    const qty = h('input', { class: 'input', type: 'number', min: '1', max: String(x.Quantity), inputmode: 'numeric', value: String(x.Quantity) });
+    const qty = h('input', { class: 'input', type: 'number', min: '1', max: String(open), inputmode: 'numeric', value: String(open) });
     async function drawSizes() {
       const keep = sizeSel.value;
       sizeSel.replaceChildren(h('option', null, 'Loading stock…'));
@@ -954,13 +1051,13 @@ function openHandoutActions(x) {
     drawSizes();
     exchange = h('div', { class: 'form' },
       field('New size', sizeSel),
-      x.Quantity > 1 ? field(`Quantity to exchange (max ${x.Quantity})`, qty) : null,
+      open > 1 ? field(`Quantity to exchange (max ${open})`, qty) : null,
       field('Exchange at', locSel),
       h('div', { class: 'muted small' }, `Size ${x.Size} goes back into stock and the new size is taken from stock at this location.`),
       h('button', {
         class: 'btn btn-block btn-brand', onclick: async () => {
-          const n = x.Quantity > 1 ? parseInt(qty.value, 10) : 1;
-          if (!(n >= 1 && n <= x.Quantity)) return toast(`Quantity must be between 1 and ${x.Quantity}`, 'error');
+          const n = open > 1 ? parseInt(qty.value, 10) : 1;
+          if (!(n >= 1 && n <= open)) return toast(`Quantity must be between 1 and ${open}`, 'error');
           if (!otherSizes.includes(sizeSel.value)) return toast('Choose the new size', 'error');
           const r = await busy('Exchanging…', () => svc.exchangeHandout(x, sizeSel.value, n, Number(locSel.value)));
           if (r === FAILED) return;
@@ -1041,7 +1138,7 @@ const HIST_SORTS = [
   ['date-desc', 'Newest first'], ['date-asc', 'Oldest first'], ['person-asc', 'Person A–Z'],
   ['product-asc', 'Equipment A–Z'], ['location-asc', 'Location A–Z'],
 ];
-const STOCK_SOURCES = ['Manual edit', 'Handout', 'Transfer', 'Handout deleted', 'Size exchange', 'Database edit', 'Other'];
+const STOCK_SOURCES = ['Manual edit', 'Handout', 'Return', 'Transfer', 'Handout deleted', 'Size exchange', 'Database edit', 'Other'];
 const STOCK_REASONS = ['Delivery received', 'Stock count correction', 'Damaged / discarded', 'Initial stock count', 'Returned by worker'];
 const HIST_DEFAULTS = {
   locationId: 'all', productId: 'all', period: 'month', from: '', to: '',
@@ -1052,6 +1149,21 @@ const hist = {
   mode: 'handouts', country: null, ...HIST_DEFAULTS,
   rows: [], total: 0, summary: [], totalsOpen: false, seq: 0,
 };
+
+// Everything the Incidents module needs from the app.
+function incidentCtx() {
+  return {
+    svc, state, COUNTRIES, countryName, periodRange, locationOptions, createSignaturePad, goToTab,
+    choosePerson: id => choosePerson(id),
+    rerender: renderView,
+    cfg: {
+      appName: cfg.appName,
+      incidentTypes: cfg.incidentTypes || ['Health and Safety', 'Quality', 'Other Policy'],
+      incidentActions: cfg.incidentActions || ['General NCR', 'Verbal Coaching', 'Yellow Card', 'Red Card'],
+      branches: cfg.branches || [],
+    },
+  };
+}
 
 function goToTab(tab) {
   state.tab = tab;
@@ -1344,11 +1456,15 @@ function openPersonEditor(person) {
     const name = h('input', { class: 'input', value: p.Title || '', autocomplete: 'off' });
     const email = h('input', { class: 'input', type: 'email', value: p.Email || '', autocomplete: 'off' });
     const phone = h('input', { class: 'input', type: 'tel', value: p.Phone || '', autocomplete: 'off' });
-    const company = h('input', { class: 'input', value: p.Company || '' });
+    const companies = [...new Set([svc.mainCompany, ...(cfg.branches || []), ...svc.personnel.map(x => (x.Company || '').trim()).filter(Boolean)])];
+    const company = h('input', { class: 'input', value: p.Company || (isNew ? svc.mainCompany : ''), list: 'company-list', autocomplete: 'off', placeholder: 'Choose or type a company' });
+    const companyList = h('datalist', { id: 'company-list' }, companies.map(c => h('option', { value: c })));
     const empNo = h('input', { class: 'input', value: p.EmployeeNo || '' });
     const loc = h('select', { class: 'input', value: p.LocationId ? String(p.LocationId) : '' },
       h('option', { value: '' }, '—'), locationOptions(svc.locations));
-    const active = h('input', { type: 'checkbox', checked: p.Active !== false });
+    const status = h('select', { class: 'input' },
+      h('option', { value: 'active' }, 'On site / active'), h('option', { value: 'rotation' }, 'In rotation (subcontractors only)'), h('option', { value: 'left' }, 'Left'));
+    status.value = svc.statusOf(p);
     const sizeInputs = PERSON_SIZES.map(([key, label, placeholder]) =>
       [key, label, h('input', { class: 'input', value: p[key] || '', placeholder, autocomplete: 'off' })]);
     let saved = null;
@@ -1359,22 +1475,26 @@ function openPersonEditor(person) {
         field('Full name *', name),
         field('Email', email),
         field('Phone', phone),
-        field('Company', company),
+        field('Company', h('div', null, company, companyList)),
         field('Employee no.', empNo),
         field('Site / location', loc),
+        field('Status', status),
         h('div', { class: 'field' },
           h('span', { class: 'field-label' }, 'Sizes'),
-          h('div', { class: 'size-inputs' }, sizeInputs.map(([, label, inp]) => h('label', { class: 'stock-cell' }, h('span', null, label), inp)))),
-        h('label', { class: 'check-row' }, active, 'Active')),
+          h('div', { class: 'size-inputs' }, sizeInputs.map(([, label, inp]) => h('label', { class: 'stock-cell' }, h('span', null, label), inp))))),
       footer: h('button', {
         class: 'btn btn-block btn-brand', onclick: async () => {
           if (!name.value.trim()) return toast('Name is required', 'error');
           if (email.value.trim() && !/^\S+@\S+\.\S+$/.test(email.value.trim())) return toast('Email address looks wrong', 'error');
           const lid = loc.value ? Number(loc.value) : null;
+          if (status.value === 'rotation' && svc.isMainCompany(company.value)) return toast(`Rotation is only for subcontractors, not ${svc.mainCompany}`, 'error');
+          const statusChanged = status.value !== svc.statusOf(p);
           const r = await busy('Saving…', () => svc.savePerson({
             id: person && person.id, Title: name.value.trim(), Email: email.value.trim(), Phone: phone.value.trim(),
             Company: company.value.trim(), EmployeeNo: empNo.value.trim(),
-            LocationId: lid, LocationName: lid ? svc.locName(lid) : '', Active: active.checked,
+            LocationId: lid, LocationName: lid ? svc.locName(lid) : '',
+            Active: status.value !== 'left', InRotation: status.value === 'rotation',
+            ...(statusChanged ? { StatusChangedAt: new Date().toISOString() } : {}),
             ...Object.fromEntries(sizeInputs.map(([key, , inp]) => [key, inp.value.trim()])),
           }));
           if (r === FAILED) return;
