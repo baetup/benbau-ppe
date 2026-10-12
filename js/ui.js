@@ -34,6 +34,49 @@ export function field(label, control) {
   return h('div', { class: 'field' }, h('span', { class: 'field-label' }, label), control);
 }
 
+// Text input with a suggestion list that opens right under it (the browser's own <datalist>
+// popup is positioned unreliably inside dialogs). Typing filters the list; anything can still be typed.
+export function suggestInput(input, suggestions) {
+  const list = h('div', { class: 'suggest-list', role: 'listbox', hidden: true });
+  const wrap = h('div', { class: 'suggest-wrap' }, input, list);
+  let active = -1;
+  const items = () => [...list.querySelectorAll('.suggest-item')];
+  const close = () => { list.hidden = true; active = -1; };
+  const choose = value => { input.value = value; close(); input.dispatchEvent(new Event('input', { bubbles: true })); };
+  const open = () => {
+    const q = input.value.trim().toLowerCase();
+    const matches = suggestions.filter(s => !q || s.toLowerCase().includes(q));
+    if (!matches.length || (matches.length === 1 && matches[0].toLowerCase() === q)) { close(); return; }
+    list.replaceChildren(...matches.map(s => h('button', {
+      type: 'button', class: 'suggest-item', role: 'option', tabindex: '-1',
+      onmousedown: e => { e.preventDefault(); choose(s); },   // before the input loses focus
+    }, s)));
+    list.hidden = false;
+    active = -1;
+  };
+  input.setAttribute('autocomplete', 'off');
+  input.addEventListener('focus', open);
+  input.addEventListener('input', e => { if (e.isTrusted) open(); });
+  input.addEventListener('blur', () => setTimeout(close, 100));
+  input.addEventListener('keydown', e => {
+    const all = items();
+    if (list.hidden || !all.length) { if (e.key === 'ArrowDown') open(); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + all.length) % all.length;
+      all.forEach((b, i) => b.classList.toggle('active', i === active));
+      all[active].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter' && active >= 0) {
+      e.preventDefault();
+      choose(all[active].textContent);
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      close();
+    }
+  });
+  return wrap;
+}
+
 export function emptyState(iconName, title, text) {
   return h('div', { class: 'empty-state' },
     h('div', { class: 'empty-icon' }, icon(iconName)),

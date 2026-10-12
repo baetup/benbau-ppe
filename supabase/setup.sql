@@ -199,6 +199,20 @@ create index if not exists stock_log_date_idx on public.stock_log (changed_at de
 create index if not exists stock_log_location_idx on public.stock_log (location_id);
 create index if not exists stock_log_product_idx on public.stock_log (product_id);
 
+-- ---------- user roles ----------
+-- role: 'admin' (all countries), 'lead' (all locations in `country`), 'officer' (hands out only at `location_id`).
+-- Users who existed before roles were added become admin; new users default to officer.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'staff' and column_name = 'role') then
+    alter table public.staff add column role text not null default 'admin';
+    alter table public.staff alter column role set default 'officer';
+  end if;
+end $$;
+alter table public.staff
+  add column if not exists country     text,
+  add column if not exists location_id bigint references public.locations(id) on delete set null;
+
 -- ---------- security ----------
 
 -- True when the signed-in user's email is in the staff table.
@@ -227,11 +241,66 @@ alter table public.returns enable row level security;
 drop policy if exists "staff read" on public.stock_log;
 create policy "staff read" on public.stock_log for select to authenticated using (public.is_staff());
 
--- Staff can read their own staff row only (staff are managed in the Supabase dashboard).
+-- True when the signed-in user is an admin.
+create or replace function public.is_admin()
+returns boolean
+language sql stable security definer set search_path = public
+as $$
+  select exists (
+    select 1 from public.staff
+    where lower(email) = lower(coalesce(auth.jwt() ->> 'email', '')) and role = 'admin'
+  );
+$$;
+
+-- May the signed-in user hand out / edit stock at this location?
+-- admin: anywhere · lead: locations in their country · officer: only their own location.
+create or replace function public.can_operate(p_location_id bigint)
+returns boolean
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  s staff;
+  v_country text;
+begin
+  select * into s from staff where lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''));
+  if not found then return false; end if;
+  if s.role = 'admin' then return true; end if;
+  select country into v_country from locations where id = p_location_id;
+  if s.role = 'lead' then return v_country is not null and v_country = s.country; end if;
+  return s.location_id = p_location_id;
+end $$;
+
+-- Is this location in the signed-in user's country (admins: every location)?
+create or replace function public.in_my_country(p_location_id bigint)
+returns boolean
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  s staff;
+begin
+  select * into s from staff where lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''));
+  if not found then return false; end if;
+  if s.role = 'admin' then return true; end if;
+  return exists (select 1 from locations where id = p_location_id and country = s.country);
+end $$;
+
+-- The signed-in user's own staff row (name, role, country, location).
+create or replace function public.my_staff()
+returns table (email text, name text, role text, country text, location_id bigint)
+language sql stable security definer set search_path = public
+as $$
+  select s.email, s.name, s.role, s.country, s.location_id from public.staff s
+  where lower(s.email) = lower(coalesce(auth.jwt() ->> 'email', '')) limit 1;
+$$;
+
+-- Staff read their own row; admins read and manage all rows (Users & roles screen).
 drop policy if exists "read own staff row" on public.staff;
 create policy "read own staff row" on public.staff
   for select to authenticated
-  using (lower(email) = lower(coalesce(auth.jwt() ->> 'email', '')));
+  using (lower(email) = lower(coalesce(auth.jwt() ->> 'email', '')) or public.is_admin());
+drop policy if exists "admins manage staff" on public.staff;
+create policy "admins manage staff" on public.staff
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
 -- Staff have full access to the PPE data; nobody else has any.
 do $$
@@ -350,6 +419,7 @@ returns void
 language plpgsql set search_path = public
 as $$
 begin
+  if not can_operate(p_location_id) then raise exception 'You can only change stock at your own location'; end if;
   perform ppe_context('Manual edit', p_note);
   insert into stock (product_id, size, location_id, quantity, returned_quantity)
   values (p_product_id, p_size, p_location_id, p_quantity, greatest(0, least(coalesce(p_returned, 0), p_quantity)))
@@ -383,6 +453,7 @@ begin
   if not found then raise exception 'Person not found'; end if;
   select * into v_loc from locations where id = p_location_id;
   if not found then raise exception 'Location not found'; end if;
+  if not can_operate(v_loc.id) then raise exception 'You can only hand out PPE at your own location'; end if;
 
   for it in select * from jsonb_array_elements(p_items) loop
     select * into v_prod from products where id = (it ->> 'productId')::bigint;
@@ -418,6 +489,10 @@ begin
   select * into v_to from locations where id = p_to_location_id;
   if v_from.id is null or v_to.id is null then raise exception 'Location not found'; end if;
   if v_from.id = v_to.id then raise exception 'Choose a different destination'; end if;
+  -- Transfers stay within one country, and leave from a location the user may operate
+  -- (officers: their own location; leads: any location in their country; admins: anywhere).
+  if v_from.country is distinct from v_to.country then raise exception 'Transfers between countries are not allowed'; end if;
+  if not can_operate(v_from.id) then raise exception 'You can only transfer from your own location'; end if;
 
   for it in select * from jsonb_array_elements(p_items) loop
     select * into v_prod from products where id = (it ->> 'productId')::bigint;
@@ -442,6 +517,7 @@ declare
 begin
   select * into h from handouts where id = p_id;
   if not found then return; end if;
+  if h.location_id is not null and not can_operate(h.location_id) then raise exception 'You can only change handouts made at your own location'; end if;
   -- Only the part the worker still has goes back (items already returned are in stock already).
   if p_return_to_stock and h.location_id is not null and h.product_id is not null and h.quantity > h.returned_quantity then
     perform ppe_context('Handout deleted', 'Returned from ' || coalesce(h.personnel_name, 'unknown'));
@@ -473,6 +549,7 @@ begin
   end if;
   select * into v_loc from locations where id = p_location_id;
   if not found then raise exception 'Location not found'; end if;
+  if not can_operate(v_loc.id) then raise exception 'You can only exchange sizes at your own location'; end if;
 
   perform ppe_context('Size exchange', format('%s: %s → %s', coalesce(h.personnel_name, 'unknown'), h.size, p_new_size));
   perform adjust_stock(h.product_id, p_new_size, v_loc.id, -p_quantity, false);
@@ -512,6 +589,7 @@ declare
 begin
   select * into v_loc from locations where id = p_location_id;
   if not found then raise exception 'Location not found'; end if;
+  if not can_operate(v_loc.id) then raise exception 'You can only receive returned PPE at your own location'; end if;
   for it in select * from jsonb_array_elements(p_items) loop
     v_qty := (it ->> 'qty')::integer;
     continue when v_qty is null or v_qty <= 0;
@@ -629,6 +707,14 @@ $$;
 
 -- Only signed-in users may call the functions (row level security still applies inside them).
 revoke execute on function public.ppe_context(text, text) from public, anon;
+revoke execute on function public.is_admin() from public, anon;
+revoke execute on function public.can_operate(bigint) from public, anon;
+revoke execute on function public.in_my_country(bigint) from public, anon;
+grant execute on function public.is_admin() to authenticated;
+revoke execute on function public.my_staff() from public, anon;
+grant execute on function public.my_staff() to authenticated;
+grant execute on function public.can_operate(bigint) to authenticated;
+grant execute on function public.in_my_country(bigint) to authenticated;
 revoke execute on function public.adjust_stock(bigint, text, bigint, integer, boolean, integer) from public, anon;
 revoke execute on function public.set_stock(bigint, text, bigint, integer, text, integer) from public, anon;
 revoke execute on function public.record_return(bigint, bigint, jsonb, text) from public, anon;

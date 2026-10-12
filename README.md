@@ -59,6 +59,22 @@ in the app (menu → **Change password**) or with **Forgot password?** on the lo
 **To remove access:** delete the person's row in `staff`. They are locked out of all data immediately.
 You can also delete the user under Authentication → Users.
 
+### Roles
+| Role | Sees | Hands out, changes stock, receives returns, exchanges sizes | Transfers |
+|---|---|---|---|
+| **Admin** | all countries | everywhere | within a country |
+| **Lead** | their country | any location in their country | within their country |
+| **Officer** | their country | only their own location | from their own location to other locations in their country |
+
+- Transfers never go to another country, for anyone. Other locations are view-only for officers.
+- Officers always open the app at their own location; leads always open it in their own country.
+- Only admins see **Users & roles** and **Manage locations**. Only admins and leads create or rename products.
+  Officers can change stock counts at their own location.
+- The rules are enforced by the database (`can_operate`, `in_my_country` in setup.sql), not only by the app.
+- Manage roles in the app: menu → **Users & roles** (admins). Each person still needs a login in
+  Supabase → Authentication (same email). People on the staff list before roles existed became admin.
+- Demo mode: menu → **Switch demo user** to try every role with the sample data.
+
 ## 3. Publish the app on GitHub Pages
 
 In the `benbau-ppe` repository on GitHub, upload the files from this folder, keeping the folders

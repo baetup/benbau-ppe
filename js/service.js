@@ -90,6 +90,23 @@ export class PpeService {
   returnsFor(personId) { return this.db.list('returns', { PersonnelId: personId }); }
   outstandingPpe(country, status) { return this.db.outstandingPpe(country, status, this.mainCompany); }
 
+  // ---------- roles ----------
+  // admin: everything · lead: all locations in their country · officer: hands out only at their own location.
+  get role() { return (this.user && this.user.role) || 'officer'; }
+  isAdmin() { return this.role === 'admin'; }
+  // Hand out, change stock, receive returns, exchange sizes at this location?
+  canOperate(locationId) {
+    if (this.isAdmin()) return true;
+    const loc = this.location(locationId);
+    if (!loc) return false;
+    if (this.role === 'lead') return this.countryOf(loc) === this.user.country;
+    return loc.id === this.user.locationId;
+  }
+  canEditProducts() { return this.role === 'admin' || this.role === 'lead'; }
+  listStaff() { return this.db.listStaff(); }
+  saveStaff(fields, originalEmail) { return this.db.saveStaff(fields, originalEmail); }
+  deleteStaff(email) { return this.db.deleteStaff(email); }
+
   // ---------- categories & orders ----------
   categoryOf(p) { return p && p.Category === 'consumable' ? 'consumable' : 'regular'; }
   // Use per product/size at a location over the last `months` months: { first: Date|null, used: Map "pid|size" -> qty }

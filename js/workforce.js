@@ -59,9 +59,12 @@ export function openReturnModal(ctx, person, handouts, onDone) {
     .sort((a, b) => Number(isReturnable(svc, b)) - Number(isReturnable(svc, a)) || (a.Title || '').localeCompare(b.Title || ''));
   if (!open.length) return toast(`${person.Title} has no PPE left to return`, 'info');
 
-  const locs = svc.activeLocations().filter(l => svc.countryOf(l) === state.country);
-  const loc = h('select', { class: 'input' }, ctx.locationOptions(locs.length ? locs : svc.activeLocations()));
-  loc.value = String(state.locationId || person.LocationId || '');
+  // Returned PPE can only be received at locations the user may operate (officers: their own).
+  const locs = svc.activeLocations().filter(l => svc.countryOf(l) === state.country && svc.canOperate(l.id));
+  if (!locs.length) return toast('You cannot receive returned PPE at any location', 'error');
+  const loc = h('select', { class: 'input' }, locs.map(l => h('option', { value: String(l.id) }, l.Title)));
+  const preferred = [state.locationId, person.LocationId].find(id => locs.some(l => l.id === id));
+  if (preferred) loc.value = String(preferred);
   const note = h('input', { class: 'input', placeholder: 'Optional, e.g. "Left the project"' });
   const rows = open.map(x => {
     const max = outstandingQty(x);

@@ -1,4 +1,4 @@
-import { h, field, emptyState, openModal, confirmDialog, pickFrom, toast, busy, FAILED, errorMessage, todayISO, dateInputToIso, formatDate } from './ui.js';
+import { h, field, suggestInput, emptyState, openModal, confirmDialog, pickFrom, toast, busy, FAILED, errorMessage, todayISO, dateInputToIso, formatDate } from './ui.js';
 import { icon } from './icons.js';
 import { REASONS } from './schema.js';
 import { PpeService, parseSizes } from './service.js';
@@ -12,9 +12,14 @@ import { statusControl, holdingsBox, crewsView, outstandingView } from './workfo
 import { ordersView } from './orders.js';
 
 const cfg = Object.assign({ appName: 'Benbau PPE Tracker' }, window.PPE_CONFIG || {});
-const demo = !cfg.supabaseUrl || !cfg.supabaseKey || new URLSearchParams(location.search).has('demo');
+// Demo mode: always when Supabase isn't configured. With Supabase configured, "?demo" only works when
+// demoEnabled is true in config.js, or on this computer (localhost) for testing.
+const demoAllowed = cfg.demoEnabled === true || ['localhost', '127.0.0.1'].includes(location.hostname);
+const demo = !cfg.supabaseUrl || !cfg.supabaseKey || (demoAllowed && new URLSearchParams(location.search).has('demo'));
 const incidentsOn = cfg.incidentsEnabled === true;   // Incidents tab is hidden unless switched on in config.js
-const COUNTRIES =(cfg.countries && cfg.countries.length) ? cfg.countries : [{ code: 'DK', name: 'Denmark' }];
+const ALL_COUNTRIES = (cfg.countries && cfg.countries.length) ? cfg.countries : [{ code: 'DK', name: 'Denmark' }];
+// Countries this user may see: all for admins, only their own for leads and officers (set after sign-in).
+let COUNTRIES = ALL_COUNTRIES;
 // Clothing sizes stored on each person's profile: [field, label, placeholder]
 const PERSON_SIZES = [
   ['BootsSize', 'Boots', 'e.g. 43'],
@@ -23,7 +28,8 @@ const PERSON_SIZES = [
   ['VestSize', 'Vest', 'e.g. XL'],
   ['GlovesSize', 'Gloves', 'e.g. 9'],
 ];
-const countryName = code => (COUNTRIES.find(c => c.code === code) || { name: code || '—' }).name;
+const countryName = code => (ALL_COUNTRIES.find(c => c.code === code) || { name: code || '—' }).name;
+const ROLE_LABEL = { admin: 'Admin', lead: 'Lead', officer: 'Officer' };
 const app = document.getElementById('app');
 document.title = cfg.appName;
 
@@ -55,7 +61,7 @@ function savePrefs() {
   try {
     localStorage.setItem(PREF_KEY, JSON.stringify({
       tab: state.tab, country: state.country, locationId: state.locationId, personId: state.personId, cart: state.cart, cartLocationId: state.cartLocationId,
-      invCategory: state.invCategory,
+      invCategory: state.invCategory, demoUser: prefs.demoUser,
     }));
   } catch { /* storage unavailable */ }
 }
@@ -67,8 +73,10 @@ async function boot() {
   try {
     let db, user;
     if (demo) {
-      user = { name: 'Demo User', email: 'demo@example.com' };
-      db = new DemoDb(user);
+      // Demo: act as one of the demo users (menu → Switch demo user) to try the roles.
+      db = new DemoDb(null);
+      user = db.staffUser(prefs.demoUser);
+      db.user = user;
     } else {
       if (!window.supabase) throw new Error('Could not load the Supabase library. Check your internet connection and reload.');
       if (!sb) {
@@ -84,16 +92,27 @@ async function boot() {
       if (!session) return renderLogin();
 
       // Only people listed in the staff table may use the app (the database enforces this too).
-      const { data: staff, error } = await sb.from('staff').select('name, email').maybeSingle();
-      if (error) throw new Error(error.message);
+      const { data: rows, error } = await sb.rpc('my_staff');
+      if (error) throw new Error(/my_staff/.test(error.message) ? 'The database needs updating: run supabase/setup.sql in the Supabase SQL Editor.' : error.message);
+      const staff = rows && rows[0];
       if (!staff) return renderNoAccess(session.user.email);
-      user = { name: staff.name, email: session.user.email };
+      user = { name: staff.name, email: session.user.email, role: staff.role || 'officer', country: staff.country, locationId: staff.location_id };
       db = new SupabaseDb(sb);
     }
     renderLoading('Loading data…');
     svc = new PpeService(db, user);
     svc.defaultCountry = COUNTRIES[0].code;
     svc.mainCompany = cfg.mainCompany || 'Benbau';
+    // Leads and officers only see their own country.
+    if (!svc.isAdmin()) {
+      const own = ALL_COUNTRIES.filter(c => c.code === user.country);
+      COUNTRIES = own.length ? own : [ALL_COUNTRIES[0]];
+      state.country = COUNTRIES[0].code;
+      // Officers always start at their own location (they can still switch to look or transfer).
+      if (user.role === 'officer' && user.locationId) state.locationId = user.locationId;
+    } else {
+      COUNTRIES = ALL_COUNTRIES;
+    }
     await svc.loadBase();
     startApp();
   } catch (e) {
@@ -203,7 +222,7 @@ function startApp() {
   state.cart = state.cart.filter(c => svc.product(c.productId));
   savePrefs();
   renderShell();
-  if (!svc.locationsIn(state.country).length) {
+  if (!svc.locationsIn(state.country).length && svc.isAdmin()) {
     toast('Add your first location to get started');
     openLocations();
   }
@@ -300,9 +319,11 @@ function openUserMenu() {
   const m = openModal({
     title: svc.user.name, iconName: 'user', iconClass: 'c-brand', size: 'sm',
     body: h('div', { class: 'menu' },
-      h('div', { class: 'muted small pad-b' }, svc.user.email),
-      item('pin', 'Manage locations', openLocations),
+      h('div', { class: 'muted small pad-b' }, svc.user.email, h('br'), roleText(svc.user)),
+      svc.isAdmin() ? item('users', 'Users & roles', openUsers) : null,
+      svc.isAdmin() ? item('pin', 'Manage locations', openLocations) : null,
       item('refresh', 'Refresh data', refreshAll),
+      demo ? item('user', 'Switch demo user', switchDemoUser) : null,
       !demo ? item('edit', 'Change password', openChangePassword) : null,
       demo ? item('refresh', 'Reset demo data', async () => {
         if (!(await confirmDialog('Delete all demo changes and restore the sample data?', { okText: 'Reset', danger: true }))) return;
@@ -312,6 +333,96 @@ function openUserMenu() {
       demo && cfg.supabaseUrl ? item('logout', 'Leave demo', () => { location.href = location.pathname; }) : null,
       !demo ? item('logout', 'Sign out', signOut) : null),
   });
+}
+
+function roleText(u) {
+  const role = ROLE_LABEL[u.role] || 'Officer';
+  if (u.role === 'admin') return `${role} · all countries`;
+  if (u.role === 'lead') return `${role} · ${countryName(u.country)}`;
+  return `${role} · ${svc.locName(u.locationId) || 'no location set'}, ${countryName(u.country)}`;
+}
+
+// Demo only: act as another demo user to try the roles.
+async function switchDemoUser() {
+  const users = await svc.listStaff();
+  const email = await pickFrom({
+    title: 'Switch demo user', iconName: 'user', selectedId: svc.user.email,
+    items: users.map(u => ({ id: u.Email, label: u.Name, sub: roleText({ role: u.Role, country: u.Country, locationId: u.LocationId }) })),
+  });
+  if (!email || email === svc.user.email) return;
+  prefs.demoUser = email;
+  try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...JSON.parse(localStorage.getItem(PREF_KEY) || '{}'), demoUser: email, locationId: null, cart: [] })); } catch { /* ignore */ }
+  location.reload();
+}
+
+// Admin: who may use the app and with which role. Logins themselves are created in Supabase.
+async function openUsers() {
+  const body = h('div', { class: 'stack' });
+  const m = openModal({ title: 'Users & roles', iconName: 'users', iconClass: 'c-brand', body });
+  async function draw() {
+    body.replaceChildren(h('div', { class: 'loading' }, h('div', { class: 'spinner' }), 'Loading…'));
+    let users;
+    try { users = await svc.listStaff(); } catch (e) { body.replaceChildren(h('p', null, errorMessage(e))); return; }
+    body.replaceChildren(
+      h('div', { class: 'note' }, demo
+        ? 'Demo: users added here can be tried with "Switch demo user".'
+        : 'Each person also needs a login: Supabase → Authentication → Users → Add user, with the same email.'),
+      h('button', { class: 'btn btn-brand', onclick: () => editUser(null) }, icon('plus'), 'Add user'),
+      h('div', { class: 'user-list' }, users.map(u => h('button', { class: 'user-row', type: 'button', onclick: () => editUser(u) },
+        h('span', { class: 'ur-name' }, h('b', null, u.Name), h('span', { class: 'muted xsmall' }, u.Email)),
+        h('span', { class: `role-badge role-${u.Role}` }, ROLE_LABEL[u.Role] || u.Role),
+        h('span', { class: 'muted small ur-scope' }, u.Role === 'admin' ? 'All countries' : u.Role === 'lead' ? countryName(u.Country) : `${svc.locName(u.LocationId) || '—'} (${u.Country || '—'})`)))));
+  }
+  function editUser(u) {
+    const isNew = !u;
+    const name = h('input', { class: 'input', value: u ? u.Name : '' });
+    const email = h('input', { class: 'input', type: 'email', value: u ? u.Email : '', autocomplete: 'off' });
+    const role = h('select', { class: 'input' }, Object.entries(ROLE_LABEL).map(([v, l]) => h('option', { value: v }, l)));
+    role.value = u ? u.Role : 'officer';
+    const country = h('select', { class: 'input' }, ALL_COUNTRIES.map(c => h('option', { value: c.code }, c.name)));
+    country.value = (u && u.Country) || state.country;
+    const loc = h('select', { class: 'input' });
+    const drawLocs = () => {
+      const keep = loc.value || (u && String(u.LocationId || ''));
+      loc.replaceChildren(...svc.activeLocations().filter(l => svc.countryOf(l) === country.value).map(l => h('option', { value: String(l.id) }, l.Title)));
+      if ([...loc.options].some(o => o.value === keep)) loc.value = keep;
+    };
+    drawLocs();
+    country.addEventListener('change', drawLocs);
+    const countryField = field('Country', country), locField = field('Location (officers)', loc);
+    const sync = () => { countryField.hidden = role.value === 'admin'; locField.hidden = role.value !== 'officer'; };
+    role.addEventListener('change', sync);
+    sync();
+    const self = u && u.Email.toLowerCase() === svc.user.email.toLowerCase();
+    const em = openModal({
+      title: isNew ? 'Add user' : 'Edit user', iconName: 'user', iconClass: 'c-brand', size: 'sm', persistent: true,
+      body: h('div', { class: 'form' },
+        field('Name *', name), field('Email (same as their login) *', email), field('Role', role), countryField, locField,
+        h('div', { class: 'muted small' }, 'Admin: everything, all countries. Lead: all locations in the country. Officer: hands out and changes stock only at their location, can transfer within the country.')),
+      footer: h('div', { class: 'btn-row' },
+        !isNew && !self ? h('button', { class: 'btn btn-outline c-red', onclick: async () => {
+          if (!(await confirmDialog(`Remove ${u.Name}? They will no longer be able to use the app.`, { okText: 'Remove', danger: true }))) return;
+          const r = await busy('Removing…', () => svc.deleteStaff(u.Email));
+          if (r === FAILED) return;
+          em.close(); toast('User removed', 'success'); draw();
+        } }, icon('trash'), 'Remove') : null,
+        h('button', { class: 'btn btn-brand', onclick: async () => {
+          if (!name.value.trim() || !/^\S+@\S+\.\S+$/.test(email.value.trim())) return toast('Enter a name and a valid email', 'error');
+          if (self && role.value !== 'admin') return toast('You cannot remove your own admin role', 'error');
+          if (role.value === 'officer' && !loc.value) return toast('Choose the officer\'s location', 'error');
+          const fields = {
+            Email: email.value.trim().toLowerCase(), Name: name.value.trim(), Role: role.value,
+            Country: role.value === 'admin' ? null : country.value,
+            LocationId: role.value === 'officer' ? Number(loc.value) : null,
+          };
+          const r = await busy('Saving…', () => svc.saveStaff(fields, u ? u.Email : null));
+          if (r === FAILED) return;
+          em.close(); toast('User saved', 'success'); draw();
+        } }, icon('check'), 'Save')),
+    });
+  }
+  draw();
+  return m;
 }
 
 function openChangePassword() {
@@ -355,11 +466,13 @@ function inventoryView() {
     h('div', { class: 'toolbar' },
       h('label', { class: 'location-pill' }, icon('pin'), locSelect, icon('chevronDown', 'chev')),
       h('button', { class: 'btn btn-outline cart-btn', 'aria-label': 'Cart', onclick: openCart }, icon('cart'), h('span', { class: 'badge', id: 'cart-badge' }))),
+    state.locationId && !svc.canOperate(state.locationId) ? h('div', { class: 'note' },
+      `You can look at the stock of ${svc.locName(state.locationId)}. Handouts, transfers and stock changes are only possible from ${svc.locName(svc.user.locationId) || 'your own location'}.`) : null,
     h('div', { class: 'segmented wide' }, catBtn('regular', 'Regular PPE'), catBtn('consumable', 'Consumables')),
     h('div', { class: 'toolbar' },
       h('label', { class: 'search' }, icon('search'),
         h('input', { type: 'search', placeholder: consumable ? 'Search consumables…' : 'Search PPE…', value: state.search, oninput: e => { state.search = e.target.value; fillProductList(); } })),
-      h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(null, state.invCategory) }, icon('plus'),
+      !svc.canEditProducts() ? null : h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(null, state.invCategory) }, icon('plus'),
         h('span', { class: 'hide-sm' }, consumable ? 'New consumable' : 'New PPE item'))),
     h('div', { class: 'product-grid', id: 'product-list' }));
 }
@@ -373,8 +486,7 @@ async function changeLocation(id, select) {
   state.locationId = id;
   state.cartLocationId = id;
   savePrefs();
-  updateCartBadge();
-  loadStock();
+  renderView();   // redraws the whole tab (view-only note, buttons) and loads the stock of the new location
 }
 
 async function loadStock() {
@@ -478,8 +590,10 @@ function productCard(p) {
         h('button', { type: 'button', 'aria-label': 'Less', onclick: () => step(-1) }, icon('minus')),
         qtyInput,
         h('button', { type: 'button', 'aria-label': 'More', onclick: () => step(1) }, icon('plus'))),
-      h('button', { class: 'btn btn-dark grow', disabled: hidden, onclick: () => addToCart(p, size, parseInt(qtyInput.value, 10) || 0) }, icon('cart'), 'Add'),
-      h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(p) }, icon('edit'), h('span', { class: 'hide-xs' }, 'Edit'))));
+      h('button', { class: 'btn btn-dark grow', disabled: hidden || !svc.canOperate(state.locationId), onclick: () => addToCart(p, size, parseInt(qtyInput.value, 10) || 0) }, icon('cart'), 'Add'),
+      svc.canEditProducts() || svc.canOperate(state.locationId)
+        ? h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(p) }, icon('edit'), h('span', { class: 'hide-xs' }, svc.canEditProducts() ? 'Edit' : 'Stock'))
+        : null));
 }
 
 function addToCart(p, size, qty) {
@@ -522,8 +636,14 @@ function openCart() {
   const m = openModal({
     title: 'Selected items', titleExtra: countEl, iconName: 'cart', iconClass: 'c-brand', body,
     footer: h('div', { class: 'stack' },
-      h('button', { class: 'btn btn-block btn-outline c-green', onclick: requireItems(() => openHandout(m)) }, icon('user'), 'Handout to worker'),
-      h('button', { class: 'btn btn-block btn-outline c-blue', onclick: requireItems(() => openTransfer(m)) }, icon('swap'), 'Transfer to location'),
+      h('button', { class: 'btn btn-block btn-outline c-green', onclick: requireItems(() => {
+        if (!svc.canOperate(state.cartLocationId)) return toast(`You can only hand out PPE at ${svc.locName(svc.user.locationId) || 'your own location'}.`, 'error');
+        openHandout(m);
+      }) }, icon('user'), 'Handout to worker'),
+      h('button', { class: 'btn btn-block btn-outline c-blue', onclick: requireItems(() => {
+        if (!svc.canOperate(state.cartLocationId)) return toast(`You can only transfer from ${svc.locName(svc.user.locationId) || 'your own location'}.`, 'error');
+        openTransfer(m);
+      }) }, icon('swap'), 'Transfer to location'),
       h('button', {
         class: 'btn btn-block btn-outline', onclick: async () => {
           if (!state.cart.length) return;
@@ -691,9 +811,11 @@ function recentWarning(person, rows) {
 
 function openTransfer(cartModal) {
   const fromId = state.locationId;
-  const dests = svc.activeLocations().filter(l => l.id !== fromId);
-  if (!dests.length) return toast('Add another location first (menu → Manage locations)', 'error');
-  const dest = h('select', { class: 'input' }, h('option', { value: '' }, 'Choose destination…'), locationOptions(dests));
+  // Transfers always stay within the country of the location they leave from.
+  const fromCountry = svc.countryOf(svc.location(fromId));
+  const dests = svc.activeLocations().filter(l => l.id !== fromId && svc.countryOf(l) === fromCountry);
+  if (!dests.length) return toast(`There is no other location in ${countryName(fromCountry)} to transfer to`, 'error');
+  const dest = h('select', { class: 'input' }, h('option', { value: '' }, 'Choose destination…'), dests.map(l => h('option', { value: String(l.id) }, l.Title)));
   const reason = h('textarea', { class: 'input', rows: '5', placeholder: 'Write reason (ex: new workers incoming soon, visitors on site, backup in case of PPE wear…)' });
 
   const m = openModal({
@@ -758,7 +880,16 @@ function openProductEditor(product, newCategory = 'regular') {
   }
   sizes.addEventListener('input', drawStock);
   drawStock();
-  const stockNote = h('input', { class: 'input', list: 'stock-reasons', placeholder: 'e.g. Delivery received', autocomplete: 'off' });
+  const stockNote = h('input', { class: 'input', placeholder: 'e.g. Delivery received' });
+
+  // Officers may only change stock at their own location and cannot change the product itself.
+  const canProd = svc.canEditProducts();
+  const canStock = !!locId && svc.canOperate(locId);
+  if (!canProd) for (const el of [name, category, sizes, image, sizeType, active]) el.disabled = true;
+  if (!canStock) {
+    stockGrid.querySelectorAll('input').forEach(el => { el.disabled = true; });
+    stockNote.disabled = true;
+  }
 
   const m = openModal({
     title: isNew ? (newCategory === 'consumable' ? 'New consumable' : 'New PPE item') : 'Edit product', iconName: 'package', iconClass: 'c-brand', persistent: true,
@@ -772,16 +903,18 @@ function openProductEditor(product, newCategory = 'regular') {
         h('span', { class: 'field-label' }, `Stock at ${svc.locName(locId)}`),
         h('span', { class: 'muted small' }, 'Use this to register deliveries or correct counts. "returned" = how many of them are returned (used) PPE. Every change is logged.'),
         stockGrid) : null,
-      locId ? field('Reason for stock change', h('div', null, stockNote,
-        h('datalist', { id: 'stock-reasons' }, STOCK_REASONS.map(r => h('option', { value: r }))))) : null,
+      locId ? field('Reason for stock change', suggestInput(stockNote, STOCK_REASONS)) : null,
       !isNew && locId ? h('button', {
         class: 'link-btn', type: 'button', onclick: () => {
           m.close();
           showStockHistory(product.id, locId);
         }
       }, `Show stock history of ${product.Title} at ${svc.locName(locId)}`) : null,
-      h('label', { class: 'check-row' }, active, 'Active (uncheck to hide the product)')),
-    footer: h('button', { class: 'btn btn-block btn-brand', onclick: save }, icon('check'), 'Save'),
+      h('label', { class: 'check-row' }, active, 'Active (uncheck to hide the product)'),
+      !canProd || !canStock ? h('div', { class: 'note' }, !canProd && canStock
+        ? 'You can change the stock here. Product details can only be changed by a lead or admin.'
+        : !canStock ? `Stock at ${svc.locName(locId)} can only be changed by its officer, a lead or an admin.` : '') : null),
+    footer: canProd || canStock ? h('button', { class: 'btn btn-block btn-brand', onclick: save }, icon('check'), 'Save') : null,
   });
 
   async function save() {
@@ -793,13 +926,13 @@ function openProductEditor(product, newCategory = 'regular') {
     })).filter(e => e.qty !== e.oldQty || e.ret !== e.oldRet);
     if (edits.length && !stockNote.value.trim()) return toast('Write a reason for the stock change', 'error');
     const r = await busy('Saving…', async () => {
-      const saved = await svc.saveProduct({
+      const saved = !canProd ? product : await svc.saveProduct({
         id: product && product.id, Title: name.value.trim(),
         Sizes: parseSizes(sizes.value).join(', ') || 'OneSize', ImageUrl: image.value.trim(), Active: active.checked,
         // Consumables are never counted as lost / rotation PPE.
         SizeType: sizeType.value || null, Category: category.value, Returnable: category.value === 'regular',
       });
-      if (locId) {
+      if (locId && canStock) {
         for (const e of edits) await svc.setStock(saved.id, e.s, locId, e.qty, stockNote.value.trim(), e.ret);
       }
       return saved;
@@ -1020,7 +1153,7 @@ function handoutCard(x) {
 function openHandoutActions(x) {
   const product = svc.product(x.ProductId);
   const otherSizes = product ? svc.sizesOf(product).filter(s => s !== x.Size) : [];
-  const locs = svc.locationsIn(state.country);
+  const locs = svc.locationsIn(state.country).filter(l => svc.canOperate(l.id));
   const defaultLoc = locs.some(l => l.id === state.locationId) ? state.locationId : (locs[0] && locs[0].id);
 
   const open = x.Quantity - (x.ReturnedQuantity || 0);   // items already returned can't be exchanged
@@ -1078,7 +1211,9 @@ function openHandoutActions(x) {
       h('h3', { class: 'section-title' }, 'Exchange size'),
       exchange,
       h('h3', { class: 'section-title' }, 'Delete handout'),
-      h('button', { class: 'btn btn-block btn-outline c-red', onclick: () => { m.close(); deleteHandout(x); } }, icon('trash'), 'Delete handout')),
+      !x.LocationId || svc.canOperate(x.LocationId)
+        ? h('button', { class: 'btn btn-block btn-outline c-red', onclick: () => { m.close(); deleteHandout(x); } }, icon('trash'), 'Delete handout')
+        : h('p', { class: 'muted small' }, `Only ${x.LocationName}'s officer, a lead or an admin can delete this handout.`)),
   });
 }
 
@@ -1457,8 +1592,7 @@ function openPersonEditor(person) {
     const email = h('input', { class: 'input', type: 'email', value: p.Email || '', autocomplete: 'off' });
     const phone = h('input', { class: 'input', type: 'tel', value: p.Phone || '', autocomplete: 'off' });
     const companies = [...new Set([svc.mainCompany, ...(cfg.branches || []), ...svc.personnel.map(x => (x.Company || '').trim()).filter(Boolean)])];
-    const company = h('input', { class: 'input', value: p.Company || (isNew ? svc.mainCompany : ''), list: 'company-list', autocomplete: 'off', placeholder: 'Choose or type a company' });
-    const companyList = h('datalist', { id: 'company-list' }, companies.map(c => h('option', { value: c })));
+    const company = h('input', { class: 'input', value: p.Company || (isNew ? svc.mainCompany : ''), placeholder: 'Choose or type a company' });
     const empNo = h('input', { class: 'input', value: p.EmployeeNo || '' });
     const loc = h('select', { class: 'input', value: p.LocationId ? String(p.LocationId) : '' },
       h('option', { value: '' }, '—'), locationOptions(svc.locations));
@@ -1475,7 +1609,7 @@ function openPersonEditor(person) {
         field('Full name *', name),
         field('Email', email),
         field('Phone', phone),
-        field('Company', h('div', null, company, companyList)),
+        field('Company', suggestInput(company, companies)),
         field('Employee no.', empNo),
         field('Site / location', loc),
         field('Status', status),

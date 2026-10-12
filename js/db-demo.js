@@ -1,10 +1,14 @@
 // Demo data store with the same interface as SupabaseDb, kept in localStorage.
 // The stock operations mirror the database functions in supabase/setup.sql.
-const KEY = 'ppe-demo-db-v10';
+const KEY = 'ppe-demo-db-v11';
 
 export class DemoDb {
   constructor(user) {
     this.user = user;
+    // Remove demo data saved by older versions (frees browser storage).
+    try {
+      for (const k of Object.keys(localStorage)) if (k.startsWith('ppe-demo-db-') && k !== KEY) localStorage.removeItem(k);
+    } catch { /* storage unavailable */ }
     this.data = read() || seed();
     write(this.data);
   }
@@ -47,7 +51,48 @@ export class DemoDb {
     write(this.data);
   }
 
+  // ---------- demo users & roles (mirror of can_operate / in_my_country in setup.sql) ----------
+  staffUser(email) {
+    const s = this.rows('staff').find(x => x.Email === email) || this.rows('staff').find(x => x.Role === 'admin');
+    return { name: s.Name, email: s.Email, role: s.Role, country: s.Country, locationId: s.LocationId };
+  }
+
+  canOperate(locationId) {
+    const u = this.user;
+    if (!u || u.role === 'admin') return true;
+    const loc = this.find('locations', locationId);
+    if (!loc) return false;
+    return u.role === 'lead' ? loc.Country === u.country : loc.id === u.locationId;
+  }
+
+  mustOperate(locationId, message) {
+    if (!this.canOperate(locationId)) throw new Error(message);
+  }
+
+  async listStaff() { await tick(); return clone(this.rows('staff')).sort((a, b) => a.Name.localeCompare(b.Name)); }
+
+  async saveStaff(fields, originalEmail) {
+    await tick();
+    if (this.user.role !== 'admin') throw new Error('Only admins can manage users');
+    const row = { Email: fields.Email, Name: fields.Name, Role: fields.Role, Country: fields.Country || null, LocationId: fields.LocationId || null };
+    if (originalEmail) {
+      const i = this.rows('staff').findIndex(x => x.Email === originalEmail);
+      if (i >= 0) this.rows('staff')[i] = row;
+    } else {
+      if (this.rows('staff').some(x => x.Email.toLowerCase() === row.Email.toLowerCase())) throw new Error('This email is already on the staff list');
+      this.rows('staff').push(row);
+    }
+    write(this.data);
+  }
+
+  async deleteStaff(email) {
+    await tick();
+    this.data.tables.staff = this.rows('staff').filter(x => x.Email !== email);
+    write(this.data);
+  }
+
   async setStock(productId, size, locationId, quantity, note, returned) {
+    this.mustOperate(locationId, 'You can only change stock at your own location');
     return this.transaction(() => {
       this.ctx = { source: 'Manual edit', note };
       const row = this.stockRow(productId, size, locationId);
@@ -57,6 +102,7 @@ export class DemoDb {
   }
 
   async recordReturn(personId, locationId, items, note) {
+    this.mustOperate(locationId, 'You can only receive returned PPE at your own location');
     return this.transaction(() => {
       const person = this.find('personnel', personId);
       const loc = this.find('locations', locationId);
@@ -135,6 +181,7 @@ export class DemoDb {
   }
 
   async handout({ personId, locationId, items, reason, notes, date, signature }) {
+    this.mustOperate(locationId, 'You can only hand out PPE at your own location');
     return this.transaction(() => {
       const person = this.find('personnel', personId);
       const loc = this.find('locations', locationId);
@@ -161,6 +208,8 @@ export class DemoDb {
   async transfer({ fromId, toId, items, reason }) {
     return this.transaction(() => {
       const from = this.find('locations', fromId), to = this.find('locations', toId);
+      if (from.Country !== to.Country) throw new Error('Transfers between countries are not allowed');
+      this.mustOperate(fromId, 'You can only transfer from your own location');
       for (const it of items) {
         const p = this.find('products', it.productId);
         const why = reason ? `: ${reason}` : '';
@@ -298,6 +347,7 @@ export class DemoDb {
   }
 
   async exchangeHandout(id, newSize, quantity, locationId) {
+    this.mustOperate(locationId, 'You can only exchange sizes at your own location');
     return this.transaction(() => {
       const h = this.find('handouts', id);
       if (!h) throw new Error('Handout not found');
@@ -324,6 +374,7 @@ export class DemoDb {
     return this.transaction(() => {
       const h = this.find('handouts', id);
       if (!h) return;
+      if (h.LocationId) this.mustOperate(h.LocationId, 'You can only change handouts made at your own location');
       this.ctx = { source: 'Handout deleted', note: `Returned from ${h.PersonnelName || 'unknown'}` };
       const open = h.Quantity - (h.ReturnedQuantity || 0);
       if (returnToStock && h.LocationId && h.ProductId && open > 0) this.adjust(h.ProductId, h.Size, h.LocationId, open, true, Math.min(h.FromReturned || 0, open));
@@ -404,127 +455,236 @@ function write(data) {
 
 function seed() {
   let id = 0;
-  const t = { locations: [], products: [], stock: [], personnel: [], handouts: [], transfers: [], stock_log: [], incidents: [], evidence_files: [], returns: [] };
+  const t = {
+    locations: [], products: [], stock: [], personnel: [], handouts: [], transfers: [], stock_log: [],
+    incidents: [], evidence_files: [], returns: [], staff: [],
+  };
   const add = (table, f) => { const row = { ...f, id: ++id }; t[table].push(row); return row; };
+  let n = 7;
+  const rnd = () => (n = (n * 9301 + 49297) % 233280) / 233280;
+  const pick = list => list[Math.floor(rnd() * list.length)];
+  const day = 86400000;
+  const iso = ms => new Date(ms).toISOString();
+  const now = Date.now();
 
+  // ----- locations -----
   const locs = [['CPH', 'DK'], ['FRD2A', 'DK'], ['Kungsgarden', 'SE'], ['Ersbo', 'SE'], ['Stackbo', 'SE']]
     .map(([Title, Country]) => add('locations', { Title, Country, Active: true }));
+  const dk = locs.filter(l => l.Country === 'DK'), se = locs.filter(l => l.Country === 'SE');
+
+  // ----- demo users (menu → Switch demo user) -----
+  const staff = [
+    ['admin@demo.benbau.dk', 'Demo Admin', 'admin', null, null],
+    ['lead.dk@demo.benbau.dk', 'Mette Hansen (Lead DK)', 'lead', 'DK', null],
+    ['lead.se@demo.benbau.dk', 'Erik Lundqvist (Lead SE)', 'lead', 'SE', null],
+    ['cph@demo.benbau.dk', 'Jonas Holm (Officer CPH)', 'officer', 'DK', locs[0].id],
+    ['frd2a@demo.benbau.dk', 'Line Sørensen (Officer FRD2A)', 'officer', 'DK', locs[1].id],
+    ['kungsgarden@demo.benbau.dk', 'Oskar Nilsson (Officer Kungsgarden)', 'officer', 'SE', locs[2].id],
+    ['ersbo@demo.benbau.dk', 'Anna Berg (Officer Ersbo)', 'officer', 'SE', locs[3].id],
+    ['stackbo@demo.benbau.dk', 'Sara Ek (Officer Stackbo)', 'officer', 'SE', locs[4].id],
+  ];
+  for (const [Email, Name, Role, Country, LocationId] of staff) t.staff.push({ Email, Name, Role, Country, LocationId });
+  const officerAt = loc => (t.staff.find(s => s.LocationId === loc.id) || t.staff[0]).Name.replace(/ \(.*\)$/, '');
+
+  // ----- products -----
   const clothes = 'S, M, L, XL, 2XL, 3XL, 4XL';
+  const boots = '38, 39, 40, 41, 42, 43, 44, 45, 46, 47';
+  const gloves = '7, 8, 9, 10, 11';
   const products = [
-    ['Winter Jacket', clothes, 'Jacket'],
-    ['Winter Trousers', clothes, 'Trousers'],
-    ['Summer Vest', 'S, M, L, XL, 2XL, 3XL', 'Vest'],
-    ['AllWeather Helmet White', 'OneSize', ''],
-    ['Work Gloves', '7, 8, 9, 10, 11', 'Gloves', 'consumable'],
-    ['Safety Boots S3', '38, 39, 40, 41, 42, 43, 44, 45, 46, 47', 'Boots'],
-    ['Safety Glasses Clear', 'OneSize', '', 'consumable'],
-    ['Ear Defenders', 'OneSize', '', 'consumable'],
-    ['Knee Pads', 'OneSize', '', 'consumable'],
-    ['Ear Plugs (box)', 'OneSize', '', 'consumable'],
+    ['Winter Jacket', clothes, 'Jacket'], ['Softshell Jacket', clothes, 'Jacket'],
+    ['Winter Trousers', clothes, 'Trousers'], ['Summer Work Trousers', clothes, 'Trousers'],
+    ['Hi-Vis Vest', 'S, M, L, XL, 2XL, 3XL', 'Vest'],
+    ['Safety Boots S3', boots, 'Boots'], ['Winter Safety Boots', boots, 'Boots'],
+    ['Safety Helmet White', 'OneSize', ''], ['Fall-Arrest Harness', 'M, L, XL', ''],
+    ['Work Gloves', gloves, 'Gloves', 'consumable'], ['Cut-Resistant Gloves', gloves, 'Gloves', 'consumable'],
+    ['Winter Gloves', gloves, 'Gloves', 'consumable'],
+    ['Safety Glasses Clear', 'OneSize', '', 'consumable'], ['Safety Glasses Tinted', 'OneSize', '', 'consumable'],
+    ['Ear Plugs (box)', 'OneSize', '', 'consumable'], ['Ear Defenders', 'OneSize', '', 'consumable'],
+    ['Knee Pads', 'OneSize', '', 'consumable'], ['FFP2 Masks (box)', 'OneSize', '', 'consumable'],
+    ['Disposable Coveralls', 'M, L, XL, 2XL', '', 'consumable'],
   ].map(([Title, Sizes, SizeType, Category = 'regular']) => add('products', {
     Title, Sizes, SizeType, Category, Returnable: Category === 'regular', ImageUrl: '', Active: true,
   }));
+  const P = title => products.find(p => p.Title === title);
+  const sizesOf = p => p.Sizes.split(',').map(s => s.trim());
 
-  let n = 7;
-  const rnd = () => (n = (n * 9301 + 49297) % 233280) / 233280;
-  for (const loc of locs.slice(0, 3)) {
+  // ----- stock at every location, with the initial count in the stock log -----
+  for (const loc of locs) {
     for (const p of products) {
-      for (const size of p.Sizes.split(',').map(s => s.trim())) {
-        const q = Math.floor(rnd() * 12);
-        if (!q) continue;
-        add('stock', { ProductId: p.id, Size: size, LocationId: loc.id, Quantity: q, ReturnedQuantity: q > 6 ? 1 : 0 });
-        add('stock_log', {
-          ChangedAt: new Date(Date.now() - (60 + Math.floor(rnd() * 60)) * 86400000).toISOString(),
-          ProductId: p.id, ProductTitle: p.Title, Size: size, LocationId: loc.id, LocationName: loc.Title,
-          OldQuantity: 0, NewQuantity: q, Change: q, Source: 'Manual edit', Note: 'Initial stock count',
-          ChangedBy: 'Demo User', ChangedByEmail: 'demo@example.com',
+      for (const size of sizesOf(p)) {
+        const r = rnd();
+        if (r < 0.08) continue;                                      // never stocked here
+        const q = r < 0.16 ? 0 : r < 0.3 ? 1 + Math.floor(rnd() * 2) : Math.floor(rnd() * (p.Category === 'consumable' ? 40 : 15));
+        add('stock', { ProductId: p.id, Size: size, LocationId: loc.id, Quantity: q, ReturnedQuantity: p.Category === 'regular' && q > 5 && rnd() < 0.4 ? 1 + Math.floor(rnd() * 2) : 0 });
+        if (q) add('stock_log', {
+          ChangedAt: iso(now - (110 + Math.floor(rnd() * 20)) * day), ProductId: p.id, ProductTitle: p.Title, Size: size,
+          LocationId: loc.id, LocationName: loc.Title, OldQuantity: 0, NewQuantity: q, Change: q, Source: 'Manual edit',
+          Note: 'Initial stock count', ChangedBy: officerAt(loc), ChangedByEmail: 'demo@demo.benbau.dk',
         });
       }
     }
   }
 
-  const people = [
-    ['Anders Jensen', 'Benbau', 0], ['Maria Nielsen', 'Benbau', 0], ['Jonas Berg', 'Nortabyg', 1],
-    ['Sofia Lindqvist', 'Benbau', 2], ['Erik Holm', 'TSI', 3], ['Lars Madsen', 'Dipwork', 0],
-    ['Piotr Nowak', 'Dipwork', 0, 'rotation'], ['Tomas Petrauskas', 'Nortabyg', 1, 'left'],
-    ['Mihai Popescu', 'HIROS', 0, 'rotation'], ['Andrei Ionescu', 'HIROS', 1], ['Jan Kowalski', 'TSI', 3, 'left'],
-    ['Karl Svensson', 'TSI', 2, 'rotation'],
-  ].map(([Title, Company, li, status]) => add('personnel', {
-    Title, Company, Email: Title.toLowerCase().replace(/\s+/g, '.') + '@example.com', Phone: '', EmployeeNo: '',
-    LocationId: locs[li].id, LocationName: locs[li].Title, Active: status !== 'left', InRotation: status === 'rotation',
-    BootsSize: String(40 + Math.floor(rnd() * 7)), JacketSize: ['M', 'L', 'XL', '2XL'][Math.floor(rnd() * 4)],
-    TrouserSize: ['M', 'L', 'XL'][Math.floor(rnd() * 3)], VestSize: ['L', 'XL', '2XL'][Math.floor(rnd() * 3)],
-    GlovesSize: String(8 + Math.floor(rnd() * 3)),
-  }));
-
-  const day = 86400000;
-  const hand = (person, product, size, daysAgo, reason, notes = '') => add('handouts', {
-    Title: product.Title, BatchId: `demo-${person.id}-${daysAgo}`, PersonnelId: person.id, PersonnelName: person.Title,
-    ProductId: product.id, Size: size, Quantity: 1, LocationId: locs[0].id, LocationName: locs[0].Title,
-    Reason: reason, Notes: notes, HandoutDate: new Date(Date.now() - daysAgo * day).toISOString(),
-    HandedOutBy: 'Demo User', HandedOutByEmail: 'demo@example.com', Signature: '',
-  });
-  hand(people[0], products[0], 'L', 110, 'New Issue');
-  hand(people[0], products[3], 'OneSize', 110, 'New Issue');
-  hand(people[0], products[2], 'L', 20, 'Replacement - Worn Out', 'Old vest torn');
-  hand(people[1], products[2], 'S', 45, 'Other', 'Management vest: HSE Lead');
-
-  // Older sample history spread over 18 months and all locations, for the History screen.
-  const reasons = ['New Issue', 'Replacement - Worn Out', 'Replacement - Damaged', 'Replacement - Lost', 'Size Change', 'Project Requirement'];
-  for (let i = 0; i < 600; i++) {
-    const person = people[Math.floor(rnd() * people.length)];
-    const product = products[Math.floor(rnd() * products.length)];
-    const sizes = product.Sizes.split(',').map(s => s.trim());
-    const loc = locs[Math.floor(rnd() * locs.length)];
-    add('handouts', {
-      Title: product.Title, BatchId: `demo-h${i}`, PersonnelId: person.id, PersonnelName: person.Title,
-      ProductId: product.id, Size: sizes[Math.floor(rnd() * sizes.length)], Quantity: 1 + Math.floor(rnd() * 2),
-      LocationId: loc.id, LocationName: loc.Title, Reason: reasons[Math.floor(rnd() * reasons.length)], Notes: '',
-      HandoutDate: new Date(Date.now() - Math.floor(rnd() * 540 * day)).toISOString(),
-      HandedOutBy: 'Demo User', HandedOutByEmail: 'demo@example.com', Signature: '',
-    });
+  // ----- workers -----
+  const first = ['Anders', 'Mads', 'Jonas', 'Frederik', 'Mikkel', 'Lars', 'Henrik', 'Søren', 'Erik', 'Johan', 'Oskar', 'Karl',
+    'Piotr', 'Tomasz', 'Marek', 'Mihai', 'Andrei', 'Ionut', 'Darius', 'Tomas', 'Mantas', 'Marius', 'Linas', 'Arturas',
+    'Imre', 'Laszlo', 'Nicolae', 'Cosmin', 'Viktor', 'Pavel', 'Maria', 'Sofia', 'Emma', 'Ida'];
+  const last = ['Jensen', 'Nielsen', 'Hansen', 'Pedersen', 'Andersen', 'Larsen', 'Svensson', 'Lindqvist', 'Holm', 'Berg',
+    'Nowak', 'Kowalski', 'Wiśniewski', 'Popescu', 'Ionescu', 'Dumitru', 'Petrauskas', 'Kazlauskas', 'Jankauskas',
+    'Ivanovas', 'Nagy', 'Kovács', 'Szabó', 'Novák', 'Dvořák', 'Horváth', 'Olsen', 'Madsen'];
+  const companies = ['Benbau', 'Benbau', 'Benbau', 'HIROS', 'Dipwork', 'Nortabyg', 'TSI'];
+  const names = new Set();
+  const people = [];
+  for (let i = 0; i < 90; i++) {
+    let name;
+    do { name = `${pick(first)} ${pick(last)}`; } while (names.has(name));
+    names.add(name);
+    const company = pick(companies);
+    const loc = rnd() < 0.5 ? pick(dk) : pick(se);
+    const sub = company !== 'Benbau';
+    const r = rnd();
+    const status = sub ? (r < 0.14 ? 'rotation' : r < 0.26 ? 'left' : 'active') : (r < 0.06 ? 'left' : 'active');
+    const jacket = pick(['M', 'L', 'L', 'XL', 'XL', '2XL', '3XL']);
+    people.push(add('personnel', {
+      Title: name, Company: company, Email: '', Phone: `+45 ${20000000 + Math.floor(rnd() * 79999999)}`, EmployeeNo: String(1000 + i),
+      LocationId: loc.id, LocationName: loc.Title, Active: status !== 'left', InRotation: status === 'rotation',
+      BootsSize: rnd() < 0.08 ? '' : String(39 + Math.floor(rnd() * 8)), JacketSize: jacket,
+      TrouserSize: rnd() < 0.1 ? '' : pick(['M', 'L', 'XL', '2XL']), VestSize: jacket,
+      GlovesSize: rnd() < 0.1 ? '' : String(8 + Math.floor(rnd() * 3)),
+      startedDaysAgo: 60 + Math.floor(rnd() * 480),
+    }));
   }
 
-  // Stock log for the last 3 months, so the Orders suggestions have history:
-  // handouts (regular PPE) and weekly manual counts that went down (consumables).
+  // ----- handouts: a starter kit when a worker starts, then replacements and consumables -----
+  const sizeFor = (person, p) => {
+    const key = { Jacket: 'JacketSize', Trousers: 'TrouserSize', Vest: 'VestSize', Boots: 'BootsSize', Gloves: 'GlovesSize' }[p.SizeType];
+    const sizes = sizesOf(p);
+    const s = key && person[key];
+    return s && sizes.includes(s) ? s : pick(sizes);
+  };
+  const reasons = ['Replacement - Worn Out', 'Replacement - Worn Out', 'Replacement - Damaged', 'Replacement - Lost', 'Size Change', 'Project Requirement'];
+  let batch = 0;
+  const handout = (person, items, daysAgo, reason) => {
+    const loc = locs.find(l => l.id === person.LocationId);
+    const date = iso(now - daysAgo * day - Math.floor(rnd() * 8) * 3600000);
+    const b = `demo-b${++batch}`;
+    for (const [p, qty] of items) {
+      add('handouts', {
+        Title: p.Title, BatchId: b, PersonnelId: person.id, PersonnelName: person.Title, ProductId: p.id, Size: sizeFor(person, p),
+        Quantity: qty, LocationId: loc.id, LocationName: loc.Title, Reason: reason, Notes: '', HandoutDate: date,
+        HandedOutBy: officerAt(loc), HandedOutByEmail: 'demo@demo.benbau.dk', Signature: '', ReturnedQuantity: 0, FromReturned: 0,
+      });
+    }
+  };
+  for (const person of people) {
+    const start = person.startedDaysAgo;
+    const winter = rnd() < 0.7;
+    handout(person, [
+      [winter ? P('Winter Jacket') : P('Softshell Jacket'), 1], [winter ? P('Winter Trousers') : P('Summer Work Trousers'), 1],
+      [P('Hi-Vis Vest'), 1], [P('Safety Boots S3'), 1], [P('Safety Helmet White'), 1],
+      [P('Work Gloves'), 2], [P('Safety Glasses Clear'), 1], [P('Ear Plugs (box)'), 1],
+    ], start, 'New Issue');
+    if (rnd() < 0.25) handout(person, [[P('Fall-Arrest Harness'), 1]], start - 2, 'Training');
+    // Replacements and consumables while the worker is on the project.
+    const until = person.Active === false ? Math.floor(rnd() * 60) : 0;
+    for (let d = start - 10; d > until; d -= 7 + Math.floor(rnd() * 25)) {
+      const r = rnd();
+      if (r < 0.45) handout(person, [[pick([P('Work Gloves'), P('Work Gloves'), P('Cut-Resistant Gloves'), P('Winter Gloves')]), 1 + Math.floor(rnd() * 3)]], d, 'Replacement - Worn Out');
+      else if (r < 0.6) handout(person, [[pick([P('Ear Plugs (box)'), P('FFP2 Masks (box)'), P('Knee Pads'), P('Safety Glasses Tinted')]), 1]], d, 'New Issue');
+      else if (r < 0.7) handout(person, [[pick([P('Winter Jacket'), P('Winter Trousers'), P('Summer Work Trousers'), P('Hi-Vis Vest'), P('Softshell Jacket')]), 1]], d, pick(reasons));
+      else if (r < 0.76) handout(person, [[pick([P('Safety Boots S3'), P('Winter Safety Boots')]), 1]], d, pick(reasons));
+      else if (r < 0.8) handout(person, [[P('Disposable Coveralls'), 2]], d, 'Project Requirement');
+    }
+  }
+
+  // ----- returns: about half of the workers who left gave (some of) their PPE back -----
+  for (const person of people.filter(p => p.Active === false && rnd() < 0.5)) {
+    for (const hnd of t.handouts.filter(x => x.PersonnelId === person.id)) {
+      const prod = products.find(p => p.id === hnd.ProductId);
+      if (prod.Category !== 'regular' || rnd() < 0.3) continue;
+      hnd.ReturnedQuantity = hnd.Quantity;
+      const toStock = rnd() < 0.7;
+      add('returns', {
+        ReturnDate: iso(now - Math.floor(rnd() * 50) * day), HandoutId: hnd.id, PersonnelId: person.id, PersonnelName: person.Title,
+        Company: person.Company, ProductId: hnd.ProductId, Title: hnd.Title, Size: hnd.Size, Quantity: hnd.Quantity,
+        LocationId: hnd.LocationId, LocationName: hnd.LocationName, ToStock: toStock, Note: 'Left the project',
+        ReceivedBy: officerAt(locs.find(l => l.id === hnd.LocationId)), ReceivedByEmail: 'demo@demo.benbau.dk',
+      });
+    }
+  }
+  for (const p of people) delete p.startedDaysAgo;
+
+  // ----- stock log for the last 3 months: handouts + weekly consumable counts (drives the Orders suggestions) -----
   for (const hnd of t.handouts) {
-    if (Date.now() - new Date(hnd.HandoutDate).getTime() > 95 * day) continue;
+    if (now - new Date(hnd.HandoutDate).getTime() > 95 * day) continue;
     add('stock_log', {
       ChangedAt: hnd.HandoutDate, ProductId: hnd.ProductId, ProductTitle: hnd.Title, Size: hnd.Size,
       LocationId: hnd.LocationId, LocationName: hnd.LocationName, OldQuantity: 0, NewQuantity: 0, Change: -hnd.Quantity,
-      Source: 'Handout', Note: `To ${hnd.PersonnelName}`, ChangedBy: 'Demo User', ChangedByEmail: 'demo@example.com',
+      Source: 'Handout', Note: `To ${hnd.PersonnelName}`, ChangedBy: hnd.HandedOutBy, ChangedByEmail: 'demo@demo.benbau.dk',
     });
   }
   for (const p of products.filter(x => x.Category === 'consumable')) {
-    for (const loc of locs.slice(0, 3)) {
-      for (const size of p.Sizes.split(',').map(s => s.trim())) {
+    for (const loc of locs) {
+      for (const size of sizesOf(p)) {
         for (let w = 12; w >= 1; w--) {
-          const used = Math.floor(rnd() * (p.Title.startsWith('Ear Plugs') ? 6 : 4));
+          const used = Math.floor(rnd() * (p.Title.includes('box') ? 6 : 4));
           if (!used) continue;
           add('stock_log', {
-            ChangedAt: new Date(Date.now() - w * 7 * day).toISOString(), ProductId: p.id, ProductTitle: p.Title, Size: size,
+            ChangedAt: iso(now - w * 7 * day), ProductId: p.id, ProductTitle: p.Title, Size: size,
             LocationId: loc.id, LocationName: loc.Title, OldQuantity: 0, NewQuantity: 0, Change: -used,
-            Source: 'Manual edit', Note: 'Weekly count', ChangedBy: 'Demo User', ChangedByEmail: 'demo@example.com',
+            Source: 'Manual edit', Note: 'Weekly count', ChangedBy: officerAt(loc), ChangedByEmail: 'demo@demo.benbau.dk',
           });
         }
       }
     }
   }
 
-  // Sample incidents.
-  const incident = (person, daysAgo, branch, li, type, description, action, count) => add('incidents', {
-    IncidentDate: new Date(Date.now() - daysAgo * day).toISOString(), PersonnelId: person.id, PersonnelName: person.Title,
-    Branch: branch, LocationId: locs[li].id, LocationName: locs[li].Title, Type: type, Description: description,
-    ActionTaken: action, BreachCount: count, ReportedBy: 'Demo User', Witnesses: '', Status: daysAgo > 20 ? 'Closed' : 'Open',
-    FollowUp: daysAgo > 20 ? 'Discussed with the worker and the supervisor.' : '', ClosedAt: daysAgo > 20 ? new Date(Date.now() - (daysAgo - 3) * day).toISOString() : null,
-    ClosedBy: daysAgo > 20 ? 'Demo User' : null, Evidence: [], Signature: '', CreatedBy: 'Demo User', CreatedAt: new Date(Date.now() - daysAgo * day).toISOString(),
-  });
-  incident(people[2], 40, 'Nortabyg', 1, 'Other Policy', 'Smoking outside the designated smoking area.', 'General NCR', 1);
-  incident(people[2], 6, 'Nortabyg', 1, 'Other Policy', 'Smoking outside the designated smoking area again.', 'Verbal Coaching', 2);
-  incident(people[0], 7, 'Benbau', 0, 'Health and Safety', 'Using hot works without a permit.', 'Verbal Coaching', 1);
-  incident(people[5], 7, 'Dipwork', 0, 'Health and Safety', 'Talking on the phone while lifting rebar bundles with the telehandler. Supervisor confirmed it is not the first time.', 'Yellow Card', 2);
-  incident(people[1], 3, 'Benbau', 0, 'Health and Safety', 'Grinding with the face mask improperly fitted and without hearing protection.', 'Verbal Coaching', 1);
-  incident(people[4], 2, 'TSI', 3, 'Quality', 'Reinforcement installed without inspection sign-off.', 'General NCR', 1);
+  // ----- transfers within each country -----
+  for (let i = 0; i < 30; i++) {
+    const group = rnd() < 0.5 ? dk : se;
+    const from = pick(group);
+    const to = pick(group.filter(l => l !== from));
+    const p = pick(products);
+    const size = pick(sizesOf(p));
+    const qty = 1 + Math.floor(rnd() * 5);
+    const date = iso(now - Math.floor(rnd() * 90) * day);
+    add('transfers', {
+      Title: p.Title, ProductId: p.id, Size: size, Quantity: qty, FromLocationId: from.id, FromLocationName: from.Title,
+      ToLocationId: to.id, ToLocationName: to.Title, Reason: pick(['New workers arriving', 'Backup stock', 'Visitors on site', '']),
+      TransferDate: date, TransferredBy: officerAt(from),
+    });
+    for (const [loc, change, note] of [[from, -qty, `To ${to.Title}`], [to, qty, `From ${from.Title}`]]) {
+      add('stock_log', {
+        ChangedAt: date, ProductId: p.id, ProductTitle: p.Title, Size: size, LocationId: loc.id, LocationName: loc.Title,
+        OldQuantity: 0, NewQuantity: 0, Change: change, Source: 'Transfer', Note: note, ChangedBy: officerAt(from), ChangedByEmail: 'demo@demo.benbau.dk',
+      });
+    }
+  }
+
+  // ----- incidents (tab hidden unless incidentsEnabled) -----
+  const violations = [
+    ['Health and Safety', 'Working at height without the harness clipped on.'],
+    ['Health and Safety', 'Grinding without safety glasses.'],
+    ['Health and Safety', 'Talking on the phone while operating the telehandler.'],
+    ['Other Policy', 'Smoking outside the designated smoking area.'],
+    ['Quality', 'Reinforcement installed without inspection sign-off.'],
+    ['Health and Safety', 'Using hot works without a permit.'],
+  ];
+  for (let i = 0; i < 18; i++) {
+    const person = pick(people);
+    const [Type, Description] = pick(violations);
+    const prior = t.incidents.filter(x => x.PersonnelId === person.id && x.Type === Type).length;
+    const daysAgo = Math.floor(rnd() * 120);
+    const loc = locs.find(l => l.id === person.LocationId);
+    add('incidents', {
+      IncidentDate: iso(now - daysAgo * day), PersonnelId: person.id, PersonnelName: person.Title, Branch: person.Company,
+      LocationId: loc.id, LocationName: loc.Title, Type, Description, BreachCount: prior + 1,
+      ActionTaken: ['Verbal Coaching', 'Yellow Card', 'Red Card'][Math.min(prior, 2)], ReportedBy: officerAt(loc), Witnesses: '',
+      Status: daysAgo > 20 ? 'Closed' : 'Open', FollowUp: daysAgo > 20 ? 'Discussed with the worker and the supervisor.' : '',
+      ClosedAt: daysAgo > 20 ? iso(now - (daysAgo - 3) * day) : null, ClosedBy: daysAgo > 20 ? officerAt(loc) : null,
+      Evidence: [], Signature: '', CreatedBy: officerAt(loc), CreatedAt: iso(now - daysAgo * day),
+    });
+  }
 
   return { nextId: id, tables: t };
 }

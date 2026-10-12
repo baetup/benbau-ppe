@@ -51,6 +51,21 @@ export class SupabaseDb {
     check(await this.sb.rpc('record_return', { p_personnel_id: personId, p_location_id: locationId, p_items: items, p_note: note || null }));
   }
 
+  // ---------- users & roles (admins only; enforced by the database) ----------
+  async listStaff() {
+    return check(await this.sb.from('staff').select('*').order('name')).map(fromDb);
+  }
+
+  async saveStaff(fields, originalEmail) {
+    const row = toDb(fields);
+    if (originalEmail) check(await this.sb.from('staff').update(row).eq('email', originalEmail));
+    else check(await this.sb.from('staff').insert(row));
+  }
+
+  async deleteStaff(email) {
+    check(await this.sb.from('staff').delete().eq('email', email));
+  }
+
   // Orders: { first_log, rows: [{ product_id, size, used }] }
   async stockUsage(locationId, from) {
     return check(await this.sb.rpc('stock_usage', { p_location_id: locationId, p_from: from }));

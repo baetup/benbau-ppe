@@ -11,6 +11,10 @@ window.PPE_CONFIG = {
   // Name shown in the header, on the login screen and on receipts
   appName: "Benbau PPE Tracker",
 
+  // Demo with sample data at <address>?demo. false = "?demo" is ignored on the website (people get the
+  // normal login screen). On your own PC (http://localhost) the demo always works for testing.
+  demoEnabled: false,
+
   // Countries the app covers. Each location belongs to one of these (set in Menu > Manage locations).
   // The first one is the default. Add more lines to add more countries.
   countries: [
@@ -30,7 +34,7 @@ window.PPE_CONFIG = {
   },
 
   // Dashboard: a size counts as "running low" when this many or fewer are left
-  lowStock: 2,
+  lowStock: 10,
 
   // Incidents tab on/off. false = hidden (nothing is deleted); set to true to show it again.
   incidentsEnabled: false,
