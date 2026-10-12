@@ -21,13 +21,11 @@ const ALL_COUNTRIES = (cfg.countries && cfg.countries.length) ? cfg.countries : 
 // Countries this user may see: all for admins, only their own for leads and officers (set after sign-in).
 let COUNTRIES = ALL_COUNTRIES;
 // Clothing sizes stored on each person's profile: [field, label, placeholder]
-const PERSON_SIZES = [
-  ['BootsSize', 'Boots', 'e.g. 43'],
-  ['JacketSize', 'Jacket', 'e.g. L'],
-  ['TrouserSize', 'Trousers', 'e.g. 52 or L'],
-  ['VestSize', 'Vest', 'e.g. XL'],
-  ['GlovesSize', 'Gloves', 'e.g. 9'],
-];
+// The size types come from config.js (sizeTypes). Entries: [type, label, placeholder].
+const SIZE_HINTS = { Boots: 'e.g. 43', Jacket: 'e.g. L', Trousers: 'e.g. 52 or L', Vest: 'e.g. XL', Gloves: 'e.g. 9' };
+const SIZE_TYPES = (Array.isArray(cfg.sizeTypes) && cfg.sizeTypes.length ? cfg.sizeTypes : ['Boots', 'Jacket', 'Trousers', 'Vest', 'Gloves'])
+  .map(t => String(t).trim()).filter(Boolean);
+const PERSON_SIZES = SIZE_TYPES.map(t => [t, t, SIZE_HINTS[t] || 'e.g. L']);
 const countryName = code => (ALL_COUNTRIES.find(c => c.code === code) || { name: code || '—' }).name;
 const ROLE_LABEL = { admin: 'Admin', lead: 'Lead', officer: 'Officer' };
 const app = document.getElementById('app');
@@ -854,7 +852,8 @@ function openProductEditor(product, newCategory = 'regular') {
   const sizes = h('input', { class: 'input', value: p.Sizes || '', placeholder: 'e.g. S, M, L, XL or OneSize' });
   const image = h('input', { class: 'input', type: 'url', value: p.ImageUrl || '', placeholder: 'https://… (optional)' });
   const active = h('input', { type: 'checkbox', checked: p.Active !== false });
-  const sizeType = h('select', { class: 'input' }, h('option', { value: '' }, '— none —'), PERSON_SIZES.map(([, label]) => h('option', { value: label }, label)));
+  const typeOptions = [...SIZE_TYPES, ...(p.SizeType && !SIZE_TYPES.includes(p.SizeType) ? [p.SizeType] : [])];
+  const sizeType = h('select', { class: 'input' }, h('option', { value: '' }, '— none —'), typeOptions.map(t => h('option', { value: t }, t)));
   sizeType.value = p.SizeType || '';
   const category = h('select', { class: 'input' },
     h('option', { value: 'regular' }, 'Regular PPE (jackets, trousers, boots…)'),
@@ -1070,16 +1069,19 @@ function workerView() {
 
 // The person's clothing sizes as small labelled boxes. compact: only the recorded ones (handout form).
 function personSizes(p, compact = false) {
-  const known = PERSON_SIZES.filter(([key]) => p[key]);
+  const known = PERSON_SIZES.filter(([type]) => svc.personSize(p, type));
   if (!known.length) {
     return h('div', { class: 'muted small sizes-empty' }, compact
       ? 'No sizes recorded for this person.'
-      : 'No sizes recorded yet — use ✎ Edit to add boots, jacket, trouser, vest and gloves sizes.');
+      : `No sizes recorded yet — use ✎ Edit to add ${SIZE_TYPES.join(', ').toLowerCase()} sizes.`);
   }
   return h('div', { class: 'person-sizes' + (compact ? ' compact' : '') },
-    (compact ? known : PERSON_SIZES).map(([key, label]) => h('div', { class: 'size-box' },
-      h('span', { class: 'size-label' }, label),
-      h('span', { class: 'size-value' + (p[key] ? '' : ' none') }, p[key] || '—'))));
+    (compact ? known : PERSON_SIZES).map(([type, label]) => {
+      const v = svc.personSize(p, type);
+      return h('div', { class: 'size-box' },
+        h('span', { class: 'size-label' }, label),
+        h('span', { class: 'size-value' + (v ? '' : ' none') }, v || '—'));
+    }));
 }
 
 async function loadHandouts(personId) {
@@ -1600,7 +1602,7 @@ function openPersonEditor(person) {
       h('option', { value: 'active' }, 'On site / active'), h('option', { value: 'rotation' }, 'In rotation (subcontractors only)'), h('option', { value: 'left' }, 'Left'));
     status.value = svc.statusOf(p);
     const sizeInputs = PERSON_SIZES.map(([key, label, placeholder]) =>
-      [key, label, h('input', { class: 'input', value: p[key] || '', placeholder, autocomplete: 'off' })]);
+      [key, label, h('input', { class: 'input', value: svc.personSize(p, key), placeholder, autocomplete: 'off' })]);
     let saved = null;
 
     const m = openModal({
@@ -1629,7 +1631,7 @@ function openPersonEditor(person) {
             LocationId: lid, LocationName: lid ? svc.locName(lid) : '',
             Active: status.value !== 'left', InRotation: status.value === 'rotation',
             ...(statusChanged ? { StatusChangedAt: new Date().toISOString() } : {}),
-            ...Object.fromEntries(sizeInputs.map(([key, , inp]) => [key, inp.value.trim()])),
+            ...svc.sizeFields(p, Object.fromEntries(sizeInputs.map(([type, , inp]) => [type, inp.value.trim()]))),
           }));
           if (r === FAILED) return;
           saved = r;

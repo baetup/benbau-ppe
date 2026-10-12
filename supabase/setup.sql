@@ -63,6 +63,19 @@ alter table public.personnel
   add column if not exists vest_size    text,
   add column if not exists gloves_size  text;
 
+-- All clothing sizes of a person in one field, e.g. {"Boots": "44", "Jacket": "M", "Helmet": "55-62"}.
+-- The size types are set in config.js (sizeTypes). The first time, the old size columns are copied in.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'personnel' and column_name = 'size_profile') then
+    alter table public.personnel add column size_profile jsonb not null default '{}'::jsonb;
+    update public.personnel set size_profile = jsonb_strip_nulls(jsonb_build_object(
+      'Boots', nullif(trim(boots_size), ''), 'Jacket', nullif(trim(jacket_size), ''),
+      'Trousers', nullif(trim(trouser_size), ''), 'Vest', nullif(trim(vest_size), ''),
+      'Gloves', nullif(trim(gloves_size), '')));
+  end if;
+end $$;
+
 create table if not exists public.handouts (
   id                  bigint generated always as identity primary key,
   batch_id            uuid not null,

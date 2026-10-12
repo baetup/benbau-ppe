@@ -233,6 +233,8 @@ Then open http://localhost:5500/. To use the real database locally, also add `ht
 to the Supabase Redirect URLs.
 
 ## Changing things
+- **Size boxes on worker profiles:** `config.js` → `sizeTypes` (add, remove, reorder). Link products to a
+  size type in product Edit → "Matches worker size" so Orders can count workers per size.
 - **Handout reasons:** `js/schema.js` (`REASONS`)
 - **Countries / app name:** `config.js`
 - **Product images:** optional. Paste a public image URL in the product's Edit form.

@@ -90,6 +90,23 @@ export class PpeService {
   returnsFor(personId) { return this.db.list('returns', { PersonnelId: personId }); }
   outstandingPpe(country, status) { return this.db.outstandingPpe(country, status, this.mainCompany); }
 
+  // ---------- clothing sizes on a person's profile ----------
+  // Stored in SizeProfile ({ Boots: '44', … }); the first five types also have their old columns, read as fallback.
+  personSize(p, type) {
+    const v = (p && p.SizeProfile && p.SizeProfile[type]) || (LEGACY_SIZE_COLUMNS[type] && p && p[LEGACY_SIZE_COLUMNS[type]]);
+    return v ? String(v).trim() : '';
+  }
+  // Fields to save for edited sizes { type: value }. Types not shown in the form (e.g. removed from config) are kept.
+  sizeFields(p, edited) {
+    const profile = { ...((p && p.SizeProfile) || {}) };
+    for (const [type, value] of Object.entries(edited)) {
+      if (value) profile[type] = value; else delete profile[type];
+    }
+    const fields = { SizeProfile: profile };
+    for (const [type, column] of Object.entries(LEGACY_SIZE_COLUMNS)) if (type in edited) fields[column] = edited[type] || '';
+    return fields;
+  }
+
   // ---------- roles ----------
   // admin: everything · lead: all locations in their country · officer: hands out only at their own location.
   get role() { return (this.user && this.user.role) || 'officer'; }
@@ -185,6 +202,9 @@ export class PpeService {
 
   locName(id) { return (this.location(id) || {}).Title || ''; }
 }
+
+// Size types that existed before sizes became configurable, with their own database columns.
+const LEGACY_SIZE_COLUMNS = { Boots: 'BootsSize', Jacket: 'JacketSize', Trousers: 'TrouserSize', Vest: 'VestSize', Gloves: 'GlovesSize' };
 
 export function parseSizes(s) {
   return String(s || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean);

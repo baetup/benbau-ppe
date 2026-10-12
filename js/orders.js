@@ -55,13 +55,13 @@ export function ordersView(ctx) {
     const csv = [];
 
     const cards = products.map(p => {
-      const sizeKey = (ctx.PERSON_SIZES.find(([, label]) => label === p.SizeType) || [])[0];
+      const sizeKey = ctx.PERSON_SIZES.some(([type]) => type === p.SizeType) ? p.SizeType : null;
       const sizes = svc.sizesOf(p);
       const workerCounts = new Map();
       let missing = 0;
       if (sizeKey) {
         for (const w of workers) {
-          const s = norm(w[sizeKey]);
+          const s = norm(svc.personSize(w, sizeKey));
           if (!s) { missing++; continue; }
           workerCounts.set(s, (workerCounts.get(s) || 0) + 1);
         }

@@ -25,6 +25,11 @@ window.PPE_CONFIG = {
   // The main company. Its workers have no rotation status and are left out of the lost / rotation PPE reports.
   mainCompany: "Benbau",
 
+  // Size boxes on each worker's profile (in this order). Add, remove or reorder freely.
+  // A product is linked to one of these in its Edit form ("Matches worker size") for the Orders tab.
+  // Renaming a type starts it empty: sizes are stored under the type's name.
+  sizeTypes: ["Boots", "Jacket", "Trousers", "Vest", "Termo Top","Termo Trouser","Rain Jacket","Rain Trousers","Winter Jacket"],
+
   // Orders tab suggestion:
   //   suggested = average use per month (last historyMonths) × coverMonths + workers with that size × workerBuffer − stock
   orderSettings: {

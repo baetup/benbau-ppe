@@ -280,7 +280,7 @@ select.input {
 .person-card { margin-bottom: 8px; }
 .person-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .person-head h2 { font-size: 19px; }
-.person-sizes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 12px; }
+.person-sizes { display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 6px; margin-top: 12px; }
 .person-sizes.compact { display: flex; flex-wrap: wrap; margin-top: 0; }
 .size-box { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; background: var(--brand-50); border: 1px solid var(--brand-100); border-radius: 10px; min-width: 0; }
 .person-sizes.compact .size-box { flex-direction: row; gap: 6px; padding: 4px 10px; }
