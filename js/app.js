@@ -46,6 +46,10 @@ const state = {
   cart: prefs.cart || [],             // [{ productId, size, qty }]
   cartLocationId: prefs.cartLocationId || null,
   invCategory: prefs.invCategory === 'consumable' ? 'consumable' : 'regular',   // Inventory sub-tab
+  invView: prefs.invView === 'list' ? 'list' : 'cards',   // type cards, or all items
+  invType: 'all',                     // 'all' | type id | 'none'
+  invSeason: 'all',                   // 'all' | season id
+  invSort: prefs.invSort || 'name',
   search: '',
   sizeSel: {},                        // productId -> selected size
   qty: {},                            // productId -> stepper value
@@ -59,7 +63,7 @@ function savePrefs() {
   try {
     localStorage.setItem(PREF_KEY, JSON.stringify({
       tab: state.tab, country: state.country, locationId: state.locationId, personId: state.personId, cart: state.cart, cartLocationId: state.cartLocationId,
-      invCategory: state.invCategory, demoUser: prefs.demoUser,
+      invCategory: state.invCategory, invView: state.invView, invSort: state.invSort, demoUser: prefs.demoUser,
     }));
   } catch { /* storage unavailable */ }
 }
@@ -456,7 +460,7 @@ function inventoryView() {
 
   const catBtn = (cat, label) => h('button', {
     class: 'seg-btn' + (state.invCategory === cat ? ' active' : ''), type: 'button',
-    onclick: () => { if (state.invCategory !== cat) { state.invCategory = cat; savePrefs(); renderView(); } },
+    onclick: () => { if (state.invCategory !== cat) { state.invCategory = cat; state.invType = 'all'; savePrefs(); renderView(); } },
   }, label, h('span', { class: 'seg-count' }, String(svc.productsIn(state.country, { activeOnly: true }).filter(p => svc.categoryOf(p) === cat).length)));
   const consumable = state.invCategory === 'consumable';
 
@@ -469,10 +473,140 @@ function inventoryView() {
     h('div', { class: 'segmented wide' }, catBtn('regular', 'Regular PPE'), catBtn('consumable', 'Consumables')),
     h('div', { class: 'toolbar' },
       h('label', { class: 'search' }, icon('search'),
-        h('input', { type: 'search', placeholder: consumable ? 'Search consumables…' : 'Search PPE…', value: state.search, oninput: e => { state.search = e.target.value; fillProductList(); } })),
+        h('input', { type: 'search', placeholder: 'Search all items…', value: state.search, oninput: e => { state.search = e.target.value; fillProductList(); } })),
+      !svc.canEditProducts() ? null : h('button', { class: 'btn btn-outline', title: 'Types & seasons', 'aria-label': 'Types and seasons', onclick: openCatalogOptions }, icon('layers'),
+        h('span', { class: 'hide-sm' }, 'Types')),
       !svc.canEditProducts() ? null : h('button', { class: 'btn btn-outline', onclick: () => openProductEditor(null, state.invCategory) }, icon('plus'),
         h('span', { class: 'hide-sm' }, consumable ? 'New consumable' : 'New PPE item'))),
+    h('div', { class: 'inv-filters', id: 'inv-filters' }),
+    h('div', { id: 'inv-nav' }),
     h('div', { class: 'product-grid', id: 'product-list' }));
+}
+
+// ---------- inventory: types (cards), seasons, sorting ----------
+const INV_SORTS = [['name', 'Name A–Z'], ['season', 'Season'], ['type', 'Type'], ['stock', 'Most in stock']];
+const productStock = p => svc.sizesOf(p).reduce((a, s) => a + stockQty(p.id, s), 0);
+const typesHere = () => svc.optionsOf('type', state.country, state.invCategory);
+const seasonsHere = () => svc.optionsOf('season', state.country);
+
+function drawInventoryFilters() {
+  const box = document.getElementById('inv-filters');
+  if (!box) return;
+  const types = typesHere(), seasons = seasonsHere();
+  if (state.invType !== 'all' && state.invType !== 'none' && !types.some(t => t.id === state.invType)) state.invType = 'all';
+  if (state.invSeason !== 'all' && !seasons.some(s => s.id === state.invSeason)) state.invSeason = 'all';
+  const sel = (label, value, options, onchange) => h('label', { class: 'mini-field' }, h('span', null, label),
+    h('select', { class: 'input', value: String(value), onchange: e => { onchange(e.target.value); savePrefs(); fillProductList(); } },
+      options.map(([v, l]) => h('option', { value: String(v) }, l))));
+  const parse = v => (v === 'all' || v === 'none' ? v : Number(v));
+  box.replaceChildren(...[
+    types.length ? sel('Type', state.invType, [['all', 'All types'], ...types.map(t => [t.id, t.Title]), ['none', 'No type']], v => { state.invType = parse(v); }) : null,
+    seasons.length ? sel('Season', state.invSeason, [['all', 'All seasons'], ...seasons.map(s => [s.id, s.Title])], v => { state.invSeason = parse(v); }) : null,
+    sel('Sort', state.invSort, INV_SORTS, v => { state.invSort = v; }),
+    types.length ? h('button', {
+      class: 'btn btn-outline view-toggle', type: 'button',
+      onclick: () => { state.invView = state.invView === 'cards' ? 'list' : 'cards'; state.invType = 'all'; savePrefs(); fillProductList(); },
+    }, icon(state.invView === 'cards' ? 'clipboard' : 'layers'), state.invView === 'cards' ? 'Show all items' : 'Show type cards') : null,
+  ].filter(Boolean));
+}
+
+// "← All types" plus a chip for every type, to go back or switch type quickly.
+function drawInventoryNav(show) {
+  const nav = document.getElementById('inv-nav');
+  if (!nav) return;
+  if (!show) { nav.replaceChildren(); return; }
+  const go = v => { state.invType = v; savePrefs(); fillProductList(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  nav.replaceChildren(h('div', { class: 'type-nav' },
+    state.invView === 'cards' ? h('button', { class: 'btn btn-outline btn-sm', type: 'button', onclick: () => go('all') }, '← All types') : null,
+    h('div', { class: 'type-chips' },
+      ...typesHere().map(t => h('button', { class: 'type-chip' + (state.invType === t.id ? ' active' : ''), type: 'button', onclick: () => go(t.id) }, t.Title)),
+      svc.productsIn(state.country, { activeOnly: true }).some(p => svc.categoryOf(p) === state.invCategory && !p.TypeId)
+        ? h('button', { class: 'type-chip' + (state.invType === 'none' ? ' active' : ''), type: 'button', onclick: () => go('none') }, 'No type') : null)));
+}
+
+function sortProducts(list) {
+  const seasonRank = p => { const o = svc.option(p.SeasonId); return o ? o.SortOrder || 0 : 999; };
+  const typeRank = p => { const o = svc.option(p.TypeId); return o ? o.SortOrder || 0 : 999; };
+  const byName = (a, b) => a.Title.localeCompare(b.Title);
+  const cmp = {
+    name: byName,
+    season: (a, b) => seasonRank(a) - seasonRank(b) || byName(a, b),
+    type: (a, b) => typeRank(a) - typeRank(b) || byName(a, b),
+    stock: (a, b) => productStock(b) - productStock(a) || byName(a, b),
+  }[state.invSort] || byName;
+  return [...list].sort(cmp);
+}
+
+function typeCard(t, products) {
+  const pics = products.map(p => p.ImageUrl).filter(Boolean).slice(0, 3);
+  const cover = t && t.ImageUrl ? [t.ImageUrl] : pics;
+  const stock = products.reduce((a, p) => a + productStock(p), 0);
+  return h('button', { class: 'type-card', type: 'button', onclick: () => { state.invType = t ? t.id : 'none'; savePrefs(); fillProductList(); window.scrollTo({ top: 0, behavior: 'smooth' }); } },
+    h('div', { class: 'tc-cover' + (cover.length ? ` n${cover.length}` : ' empty') },
+      cover.length ? cover.map(src => h('img', { src, alt: '', loading: 'lazy', onerror: e => e.target.remove() })) : icon(t ? 'layers' : 'package')),
+    h('div', { class: 'tc-body' },
+      h('b', null, t ? t.Title : 'No type'),
+      h('span', { class: 'muted small' }, `${products.length} item${products.length === 1 ? '' : 's'} · ${stock.toLocaleString()} in stock`)));
+}
+
+// Admins and leads: manage the types (per Regular / Consumables) and seasons of the current country.
+function openCatalogOptions() {
+  const body = h('div', { class: 'stack' });
+  const kindLabel = state.invCategory === 'consumable' ? 'Consumables' : 'Regular PPE';
+  function section(list, title, hint) {
+    const items = list === 'type' ? typesHere() : seasonsHere();
+    const move = async (o, dir) => {
+      const i = items.indexOf(o), j = i + dir;
+      if (j < 0 || j >= items.length) return;
+      const other = items[j];
+      const r = await busy('Saving…', async () => {
+        await svc.saveOption({ id: o.id, SortOrder: j });
+        await svc.saveOption({ id: other.id, SortOrder: i });
+        for (const [k, x] of items.entries()) if (x !== o && x !== other && x.SortOrder !== k) await svc.saveOption({ id: x.id, SortOrder: k });
+      });
+      if (r !== FAILED) draw();
+    };
+    const newName = h('input', { class: 'input', placeholder: list === 'type' ? 'New type, e.g. Jackets' : 'New season, e.g. Rain' });
+    return h('section', { class: 'opt-section' },
+      h('h3', { class: 'section-title' }, title), h('p', { class: 'muted small' }, hint),
+      ...items.map((o, i) => {
+        const name = h('input', { class: 'input', value: o.Title, 'aria-label': 'Name' });
+        const img = list === 'type' ? h('input', { class: 'input', value: o.ImageUrl || '', placeholder: 'Card picture URL (optional)', 'aria-label': 'Picture URL' }) : null;
+        const used = svc.products.filter(p => (list === 'type' ? p.TypeId : p.SeasonId) === o.id).length;
+        return h('div', { class: 'opt-row' },
+          h('div', { class: 'opt-fields' }, name, img),
+          h('div', { class: 'opt-actions' },
+            h('button', { class: 'icon-btn', title: 'Move up', disabled: i === 0, onclick: () => move(o, -1) }, icon('chevronDown', 'up')),
+            h('button', { class: 'icon-btn', title: 'Move down', disabled: i === items.length - 1, onclick: () => move(o, 1) }, icon('chevronDown')),
+            h('button', { class: 'btn btn-outline btn-sm', onclick: async () => {
+              if (!name.value.trim()) return toast('Enter a name', 'error');
+              const r = await busy('Saving…', () => svc.saveOption({ id: o.id, Title: name.value.trim(), ...(img ? { ImageUrl: img.value.trim() } : {}) }));
+              if (r !== FAILED) { toast('Saved', 'success'); draw(); }
+            } }, 'Save'),
+            h('button', { class: 'icon-btn c-red', title: 'Delete', onclick: async () => {
+              if (!(await confirmDialog(`Delete "${o.Title}"?${used ? ` ${used} product${used === 1 ? '' : 's'} will have no ${list} until you choose another one.` : ''}`, { okText: 'Delete', danger: true }))) return;
+              const r = await busy('Deleting…', () => svc.deleteOption(o));
+              if (r !== FAILED) { toast('Deleted', 'success'); draw(); }
+            } }, icon('trash'))),
+          h('span', { class: 'muted xsmall' }, `${used} product${used === 1 ? '' : 's'}`));
+      }),
+      h('div', { class: 'opt-add' }, newName, h('button', { class: 'btn btn-brand', onclick: async () => {
+        if (!newName.value.trim()) return toast('Enter a name', 'error');
+        const r = await busy('Saving…', () => svc.saveOption({
+          List: list, Title: newName.value.trim(), Country: state.country, SortOrder: items.length,
+          ...(list === 'type' ? { Kind: state.invCategory, ImageUrl: '' } : {}),
+        }));
+        if (r !== FAILED) { toast('Added', 'success'); draw(); }
+      } }, icon('plus'), 'Add')));
+  }
+  function draw() {
+    body.replaceChildren(
+      h('div', { class: 'note' }, `For ${countryName(state.country)}. Assign products to a type and season in each product's Edit form.`),
+      section('type', `Types — ${kindLabel}`, 'Shown as cards in the Inventory tab. Switch between Regular PPE and Consumables in Inventory to manage the other list.'),
+      section('season', 'Seasons', 'Used to filter and sort products, e.g. Summer, Winter, Rain, All season.'));
+  }
+  draw();
+  openModal({ title: 'Types & seasons', iconName: 'layers', iconClass: 'c-brand', body, onClose: () => renderView() });
 }
 
 async function changeLocation(id, select) {
@@ -519,20 +653,51 @@ const cartQty = (pid, size) => state.cart.filter(c => c.productId === pid && c.s
 function fillProductList() {
   const list = document.getElementById('product-list');
   if (!list) return;
+  drawInventoryFilters();
   const q = state.search.trim().toLowerCase();
   const inCat = p => svc.categoryOf(p) === state.invCategory;
+  const inSeason = p => state.invSeason === 'all' || p.SeasonId === state.invSeason;
+  const inType = p => state.invType === 'all' || (state.invType === 'none' ? !p.TypeId || !svc.option(p.TypeId) : p.TypeId === state.invType);
   const countryProducts = svc.productsIn(state.country);   // only this country's products
-  const hiddenCount = countryProducts.filter(p => inCat(p) && p.Active === false).length;
+  const consumable = state.invCategory === 'consumable';
+  const types = typesHere();
+
+  // Searching always looks through every item of the country (both tabs, every type).
+  if (q) {
+    drawInventoryNav(false);
+    const found = sortProducts(countryProducts.filter(p => p.Active !== false && p.Title.toLowerCase().includes(q)));
+    list.replaceChildren(
+      h('div', { class: 'grid-note muted small' }, `${found.length} result${found.length === 1 ? '' : 's'} for “${state.search.trim()}” in all types`),
+      ...(found.length ? found.map(productCard) : [emptyState('search', 'No matching items', 'Try another search.')]));
+    return;
+  }
+
+  // Type cards (when types exist and no type is chosen).
+  const active = countryProducts.filter(p => p.Active !== false && inCat(p) && inSeason(p));
+  if (state.invView === 'cards' && state.invType === 'all' && types.length) {
+    drawInventoryNav(false);
+    const untyped = active.filter(p => !p.TypeId || !svc.option(p.TypeId));
+    // With a season filter, only types that have items in that season.
+    const cards = types.map(t => [t, active.filter(p => p.TypeId === t.id)]).filter(([, ps]) => state.invSeason === 'all' || ps.length);
+    list.replaceChildren(...cards.map(([t, ps]) => typeCard(t, ps)),
+      ...(untyped.length ? [typeCard(null, untyped)] : []),
+      ...(cards.length || untyped.length ? [] : [emptyState('package', 'Nothing here', 'No items in this season.')]));
+    list.classList.add('type-grid');
+    return;
+  }
+  list.classList.remove('type-grid');
+  drawInventoryNav(types.length && state.invType !== 'all');
+
+  const hiddenCount = countryProducts.filter(p => inCat(p) && inType(p) && p.Active === false).length;
   if (!hiddenCount) state.showHidden = false;
-  const prods = countryProducts.filter(p => (state.showHidden || p.Active !== false) && inCat(p) && (!q || p.Title.toLowerCase().includes(q)));
+  const prods = sortProducts(countryProducts.filter(p => (state.showHidden || p.Active !== false) && inCat(p) && inType(p) && inSeason(p)));
   const toggle = hiddenCount ? h('button', {
     class: 'link-btn hidden-toggle', type: 'button',
     onclick: () => { state.showHidden = !state.showHidden; fillProductList(); },
   }, state.showHidden ? 'Hide hidden products' : `Show hidden products (${hiddenCount})`) : null;
-  const consumable = state.invCategory === 'consumable';
   if (!prods.length) {
-    list.replaceChildren(q
-      ? emptyState('search', 'No matching products', 'Try another search.')
+    list.replaceChildren(state.invType !== 'all' || state.invSeason !== 'all'
+      ? emptyState('package', 'Nothing here', 'No items match this type / season.')
       : emptyState('package', consumable ? 'No consumables yet' : 'No PPE items yet',
           consumable ? 'Add gloves, ear plugs, knee pads… with “New consumable”.' : 'Add jackets, trousers, boots… with “New PPE item”.'),
       ...(toggle ? [toggle] : []));
@@ -574,6 +739,9 @@ function productCard(p) {
     h('div', { class: 'pc-top' },
       thumb(p, 'thumb'),
       h('div', { class: 'pc-title' }, h('h3', null, p.Title),
+        h('div', { class: 'pc-tags' },
+          svc.option(p.TypeId) ? h('span', { class: 'mini' }, svc.option(p.TypeId).Title) : null,
+          svc.option(p.SeasonId) ? h('span', { class: `mini season s-${svc.option(p.SeasonId).Title.toLowerCase().replace(/[^a-z]+/g, '-')}` }, svc.option(p.SeasonId).Title) : null),
         hidden ? h('span', { class: 'tag tag-grey' }, 'Hidden — open Edit to show it again') : null),
       h('div', { class: 'pc-counts' },
         h('div', { class: 'count-stock' + (inStock <= 0 ? ' zero' : '') }, inStock), h('div', { class: 'count-label' }, 'in stock'),
@@ -863,6 +1031,24 @@ function openProductEditor(product, newCategory = 'regular') {
     h('option', { value: 'regular' }, 'Regular PPE (jackets, trousers, boots…)'),
     h('option', { value: 'consumable' }, 'Consumable (gloves, ear plugs, knee pads…)'));
   category.value = svc.categoryOf(p);
+  // Type (card in Inventory) and season; the lists depend on the product's country and category.
+  const typeSel = h('select', { class: 'input' });
+  const seasonSel = h('select', { class: 'input' });
+  const drawTypeOptions = () => {
+    const keepType = typeSel.value || String(p.TypeId || '');
+    const keepSeason = seasonSel.value || String(p.SeasonId || '');
+    typeSel.replaceChildren(h('option', { value: '' }, '— no type —'),
+      ...svc.optionsOf('type', country.value, category.value).map(o => h('option', { value: String(o.id) }, o.Title)));
+    seasonSel.replaceChildren(h('option', { value: '' }, '— no season —'),
+      ...svc.optionsOf('season', country.value).map(o => h('option', { value: String(o.id) }, o.Title)));
+    typeSel.value = [...typeSel.options].some(o => o.value === keepType) ? keepType : '';
+    seasonSel.value = [...seasonSel.options].some(o => o.value === keepSeason) ? keepSeason : '';
+  };
+  // New product created from inside a type: start with that type.
+  if (!product && typeof state.invType === 'number') p.TypeId = state.invType;
+  drawTypeOptions();
+  category.addEventListener('change', drawTypeOptions);
+  country.addEventListener('change', drawTypeOptions);
   const stockGrid = h('div', { class: 'stock-grid' });
   // Returned (used) stock only matters for regular PPE.
   const syncCategory = () => stockGrid.classList.toggle('no-returned', category.value === 'consumable');
@@ -888,7 +1074,7 @@ function openProductEditor(product, newCategory = 'regular') {
   // Officers may only change stock at their own location and cannot change the product itself.
   const canProd = svc.canEditProducts();
   const canStock = !!locId && svc.canOperate(locId);
-  if (!canProd) for (const el of [name, category, sizes, image, sizeType, active]) el.disabled = true;
+  if (!canProd) for (const el of [name, category, sizes, image, sizeType, active, typeSel, seasonSel]) el.disabled = true;
   if (!canStock) {
     stockGrid.querySelectorAll('input').forEach(el => { el.disabled = true; });
     stockNote.disabled = true;
@@ -900,6 +1086,7 @@ function openProductEditor(product, newCategory = 'regular') {
       field('Product name *', name),
       field('Category', category),
       ALL_COUNTRIES.length > 1 ? field('Country (products are separate per country)', country) : null,
+      h('div', { class: 'form-2col' }, field('Type', typeSel), field('Season', seasonSel)),
       field('Sizes / variants (comma separated)', sizes),
       field('Image URL', image),
       field('Matches worker size (for Orders)', sizeType),
@@ -955,6 +1142,7 @@ function openProductEditor(product, newCategory = 'regular') {
         // Consumables are never counted as lost / rotation PPE.
         SizeType: sizeType.value || null, Category: category.value, Returnable: category.value === 'regular',
         Country: country.value,
+        TypeId: typeSel.value ? Number(typeSel.value) : null, SeasonId: seasonSel.value ? Number(seasonSel.value) : null,
       });
       if (locId && canStock) {
         for (const e of edits) await svc.setStock(saved.id, e.s, locId, e.qty, stockNote.value.trim(), e.ret);

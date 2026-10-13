@@ -1,6 +1,6 @@
 // Demo data store with the same interface as SupabaseDb, kept in localStorage.
 // The stock operations mirror the database functions in supabase/setup.sql.
-const KEY = 'ppe-demo-db-v12';
+const KEY = 'ppe-demo-db-v13';
 
 export class DemoDb {
   constructor(user) {
@@ -472,7 +472,7 @@ function seed() {
   let id = 0;
   const t = {
     locations: [], products: [], stock: [], personnel: [], handouts: [], transfers: [], stock_log: [],
-    incidents: [], evidence_files: [], returns: [], staff: [],
+    incidents: [], evidence_files: [], returns: [], staff: [], options: [],
   };
   const add = (table, f) => { const row = { ...f, id: ++id }; t[table].push(row); return row; };
   let n = 7;
@@ -524,6 +524,33 @@ function seed() {
     Title: Country === 'SE' && swedish[title] ? swedish[title] : title, Sizes, SizeType, Category,
     Returnable: Category === 'regular', ImageUrl: '', Active: true, Country, base: title,
   })));
+  // Types (Inventory cards) and seasons per country, and which products belong to them.
+  const typeOf = {
+    'Winter Jacket': 'Jackets', 'Softshell Jacket': 'Jackets', 'Winter Trousers': 'Trousers', 'Summer Work Trousers': 'Trousers',
+    'Hi-Vis Vest': 'Vests', 'Safety Boots S3': 'Boots', 'Winter Safety Boots': 'Boots', 'Safety Helmet White': 'Helmets',
+    'Fall-Arrest Harness': 'Fall protection', 'Work Gloves': 'Gloves', 'Cut-Resistant Gloves': 'Gloves', 'Winter Gloves': 'Gloves',
+    'Safety Glasses Clear': 'Eye protection', 'Safety Glasses Tinted': 'Eye protection', 'Ear Plugs (box)': 'Hearing protection',
+    'Ear Defenders': 'Hearing protection', 'Knee Pads': 'Knee protection', 'FFP2 Masks (box)': 'Respiratory', 'Disposable Coveralls': 'Coveralls',
+  };
+  const seasonOf = {
+    'Winter Jacket': 'Winter', 'Softshell Jacket': 'All season', 'Winter Trousers': 'Winter', 'Summer Work Trousers': 'Summer',
+    'Hi-Vis Vest': 'Summer', 'Winter Safety Boots': 'Winter', 'Winter Gloves': 'Winter', 'Safety Glasses Tinted': 'Summer',
+  };
+  const regularTypes = ['Jackets', 'Trousers', 'Vests', 'Boots', 'Helmets', 'Fall protection'];
+  const consumableTypes = ['Gloves', 'Eye protection', 'Hearing protection', 'Knee protection', 'Respiratory', 'Coveralls'];
+  const opt = {};
+  for (const Country of ['DK', 'SE']) {
+    regularTypes.forEach((Title, i) => { opt[`type|${Title}|${Country}`] = add('options', { List: 'type', Title, Kind: 'regular', Country, ImageUrl: '', SortOrder: i }); });
+    consumableTypes.forEach((Title, i) => { opt[`type|${Title}|${Country}`] = add('options', { List: 'type', Title, Kind: 'consumable', Country, ImageUrl: '', SortOrder: i }); });
+    ['Summer', 'Winter', 'Rain', 'All season'].forEach((Title, i) => { opt[`season|${Title}|${Country}`] = add('options', { List: 'season', Title, Country, SortOrder: i }); });
+  }
+  for (const p of products) {
+    const ty = opt[`type|${typeOf[p.base]}|${p.Country}`];
+    const se = opt[`season|${seasonOf[p.base] || 'All season'}|${p.Country}`];
+    p.TypeId = ty ? ty.id : null;
+    p.SeasonId = se ? se.id : null;
+  }
+
   // PC(base title, country) -> that country's version of the product.
   const PC = (title, country) => products.find(p => p.base === title && p.Country === country);
   const sizesOf = p => p.Sizes.split(',').map(s => s.trim());

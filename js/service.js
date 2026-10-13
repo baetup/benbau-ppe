@@ -9,7 +9,11 @@ export class PpeService {
   }
 
   async loadBase() {
-    const [l, p, pe] = await Promise.all([this.db.list('locations'), this.db.list('products'), this.db.list('personnel')]);
+    const [l, p, pe, o] = await Promise.all([
+      this.db.list('locations'), this.db.list('products'), this.db.list('personnel'),
+      this.db.list('options').catch(() => []),   // types & seasons (empty until the database is updated)
+    ]);
+    this.options = o;
     this.locations = sortByTitle(l);
     this.products = sortByTitle(p);
     this.personnel = sortByTitle(pe);
@@ -41,6 +45,27 @@ export class PpeService {
   // ---------- master data ----------
   saveLocation(data) { return this.save('locations', this.locations, data); }
   saveProduct(data) { return this.save('products', this.products, data); }
+  // ---------- types & seasons (Inventory cards and filters) ----------
+  // list: 'type' | 'season'; kind (types only): 'regular' | 'consumable'
+  optionsOf(list, country, kind) {
+    return (this.options || [])
+      .filter(o => o.List === list && o.Country === country && (!kind || o.Kind === kind))
+      .sort((a, b) => (a.SortOrder || 0) - (b.SortOrder || 0) || a.Title.localeCompare(b.Title));
+  }
+  option(id) { return (this.options || []).find(o => o.id === id); }
+  async saveOption(data) {
+    const { id, ...fields } = data;
+    const row = id ? await this.db.update('options', id, fields) : await this.db.create('options', fields);
+    this.options = [...(this.options || []).filter(o => o.id !== row.id), row];
+    return row;
+  }
+  async deleteOption(o) {
+    await this.db.remove('options', o.id);
+    this.options = this.options.filter(x => x.id !== o.id);
+    const key = o.List === 'type' ? 'TypeId' : 'SeasonId';
+    for (const p of this.products) if (p[key] === o.id) p[key] = null;   // the database does the same (on delete set null)
+  }
+
   // Deletes the product and its stock everywhere; handouts, returns and the stock log keep the product name.
   async deleteProduct(p) {
     await this.db.remove('products', p.id);

@@ -209,6 +209,23 @@ begin
   end if;
 end $$;
 
+-- Inventory lists managed by admins and leads, per country:
+--   list = 'type'   (Jackets, Vests…; kind = 'regular' or 'consumable') — the cards in the Inventory tab
+--   list = 'season' (Summer, Winter, Rain, All season)
+create table if not exists public.catalog_options (
+  id         bigint generated always as identity primary key,
+  list       text not null check (list in ('type', 'season')),
+  title      text not null,
+  kind       text,                       -- types only: 'regular' or 'consumable'
+  country    text not null,
+  image_url  text,                       -- optional picture for a type card
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+alter table public.products
+  add column if not exists type_id   bigint references public.catalog_options(id) on delete set null,
+  add column if not exists season_id bigint references public.catalog_options(id) on delete set null;
+
 -- PPE given back by a worker (e.g. when leaving). to_stock = put back into stock as returned PPE.
 create table if not exists public.returns (
   id                bigint generated always as identity primary key,
@@ -388,6 +405,14 @@ create policy "leads add products" on public.products for insert to authenticate
 create policy "leads change products" on public.products for update to authenticated
   using (public.can_manage_product(country)) with check (public.can_manage_product(country));
 create policy "leads delete products" on public.products for delete to authenticated using (public.can_manage_product(country));
+
+-- Types and seasons: read by all staff, managed by admins and leads (own country).
+alter table public.catalog_options enable row level security;
+drop policy if exists "staff read options" on public.catalog_options;
+drop policy if exists "leads manage options" on public.catalog_options;
+create policy "staff read options" on public.catalog_options for select to authenticated using (public.is_staff());
+create policy "leads manage options" on public.catalog_options for all to authenticated
+  using (public.can_manage_product(country)) with check (public.can_manage_product(country));
 
 -- ---------- evidence files (private storage bucket, staff only) ----------
 insert into storage.buckets (id, name, public, file_size_limit)

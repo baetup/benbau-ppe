@@ -4,7 +4,7 @@
 
 const TABLES = {
   locations: 'locations', products: 'products', stock: 'stock',
-  personnel: 'personnel', handouts: 'handouts', transfers: 'transfers', incidents: 'incidents', returns: 'returns',
+  personnel: 'personnel', handouts: 'handouts', transfers: 'transfers', incidents: 'incidents', returns: 'returns', options: 'catalog_options',
 };
 const INCIDENT_COLUMNS = 'id,incident_date,personnel_id,personnel_name,branch,location_id,location_name,type,description,action_taken,breach_count,reported_by,witnesses,status,follow_up,closed_at,closed_by,evidence,created_by,created_at';
 const PAGE = 1000;
