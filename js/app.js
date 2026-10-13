@@ -457,7 +457,7 @@ function inventoryView() {
   const catBtn = (cat, label) => h('button', {
     class: 'seg-btn' + (state.invCategory === cat ? ' active' : ''), type: 'button',
     onclick: () => { if (state.invCategory !== cat) { state.invCategory = cat; savePrefs(); renderView(); } },
-  }, label, h('span', { class: 'seg-count' }, String(svc.activeProducts().filter(p => svc.categoryOf(p) === cat).length)));
+  }, label, h('span', { class: 'seg-count' }, String(svc.productsIn(state.country, { activeOnly: true }).filter(p => svc.categoryOf(p) === cat).length)));
   const consumable = state.invCategory === 'consumable';
 
   return h('div', { class: 'inventory' },
@@ -521,9 +521,10 @@ function fillProductList() {
   if (!list) return;
   const q = state.search.trim().toLowerCase();
   const inCat = p => svc.categoryOf(p) === state.invCategory;
-  const hiddenCount = svc.products.filter(p => inCat(p) && p.Active === false).length;
+  const countryProducts = svc.productsIn(state.country);   // only this country's products
+  const hiddenCount = countryProducts.filter(p => inCat(p) && p.Active === false).length;
   if (!hiddenCount) state.showHidden = false;
-  const prods = (state.showHidden ? svc.products : svc.activeProducts()).filter(p => inCat(p) && (!q || p.Title.toLowerCase().includes(q)));
+  const prods = countryProducts.filter(p => (state.showHidden || p.Active !== false) && inCat(p) && (!q || p.Title.toLowerCase().includes(q)));
   const toggle = hiddenCount ? h('button', {
     class: 'link-btn hidden-toggle', type: 'button',
     onclick: () => { state.showHidden = !state.showHidden; fillProductList(); },
@@ -846,7 +847,10 @@ function openTransfer(cartModal) {
 // ---------- products ----------
 function openProductEditor(product, newCategory = 'regular') {
   const isNew = !product;
-  const p = product || { Title: '', Sizes: newCategory === 'consumable' ? 'OneSize' : 'S, M, L, XL, 2XL', ImageUrl: '', Active: true, Category: newCategory };
+  const p = product || { Title: '', Sizes: newCategory === 'consumable' ? 'OneSize' : 'S, M, L, XL, 2XL', ImageUrl: '', Active: true, Category: newCategory, Country: state.country };
+  // Products belong to one country. Only admins can move a product to another country.
+  const country = h('select', { class: 'input', disabled: !svc.isAdmin() }, ALL_COUNTRIES.map(c => h('option', { value: c.code }, c.name)));
+  country.value = svc.productCountry(p);
   const locId = state.locationId;
   const name = h('input', { class: 'input', value: p.Title || '' });
   const sizes = h('input', { class: 'input', value: p.Sizes || '', placeholder: 'e.g. S, M, L, XL or OneSize' });
@@ -895,6 +899,7 @@ function openProductEditor(product, newCategory = 'regular') {
     body: h('div', { class: 'form' },
       field('Product name *', name),
       field('Category', category),
+      ALL_COUNTRIES.length > 1 ? field('Country (products are separate per country)', country) : null,
       field('Sizes / variants (comma separated)', sizes),
       field('Image URL', image),
       field('Matches worker size (for Orders)', sizeType),
@@ -930,6 +935,7 @@ function openProductEditor(product, newCategory = 'regular') {
         Sizes: parseSizes(sizes.value).join(', ') || 'OneSize', ImageUrl: image.value.trim(), Active: active.checked,
         // Consumables are never counted as lost / rotation PPE.
         SizeType: sizeType.value || null, Category: category.value, Returnable: category.value === 'regular',
+        Country: country.value,
       });
       if (locId && canStock) {
         for (const e of edits) await svc.setStock(saved.id, e.s, locId, e.qty, stockNote.value.trim(), e.ret);
@@ -1410,7 +1416,8 @@ function renderHistoryFilters() {
   box.replaceChildren(...[
     COUNTRIES.length > 1 ? select('country', 'Country', [['all', 'All countries'], ...COUNTRIES.map(c => [c.code, c.name])], () => { hist.locationId = 'all'; }) : null,
     select('locationId', 'Location', [['all', 'All locations'], ...locs.map(l => [l.id, l.Title + (l.Active === false ? ' (inactive)' : '')])]),
-    select('productId', 'Equipment', [['all', 'All equipment'], ...svc.products.map(p => [p.id, p.Title])]),
+    select('productId', 'Equipment', [['all', 'All equipment'],
+      ...svc.productsIn(hist.country).map(p => [p.id, hist.country === 'all' ? `${p.Title} (${svc.productCountry(p)})` : p.Title])]),
     stock
       ? select('source', 'Type of change', [['all', 'All changes'], ...STOCK_SOURCES.map(s => [s, s])])
       : select('reason', 'Reason', [['all', 'All reasons'], ...REASONS.map(r => [r, r])]),

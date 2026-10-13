@@ -168,6 +168,47 @@ alter table public.handouts
   add column if not exists returned_quantity integer not null default 0,  -- how many of this handout came back
   add column if not exists from_returned     integer not null default 0;  -- how many were handed out from returned stock
 
+-- Products belong to one country (different products / standards per country).
+-- The first time: a product used in one country gets that country; a product used in several countries
+-- is split into one copy per country, and each country's stock, handouts, returns and log move to its copy.
+-- Unused products get the country with the most locations.
+do $$
+declare
+  r     record;
+  i     integer;
+  v_new bigint;
+  v_loc bigint[];
+begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'country') then
+    alter table public.products add column country text;
+    for r in
+      select p.id, array_agg(distinct l.country order by l.country) as countries
+      from public.products p
+      join (select product_id, location_id from public.stock
+            union select product_id, location_id from public.handouts where product_id is not null) u on u.product_id = p.id
+      join public.locations l on l.id = u.location_id
+      group by p.id
+    loop
+      update public.products set country = r.countries[1] where id = r.id;
+      for i in 2 .. coalesce(array_length(r.countries, 1), 1) loop
+        insert into public.products (title, sizes, image_url, active, size_type, returnable, category, country)
+        select title, sizes, image_url, active, size_type, returnable, category, r.countries[i]
+        from public.products where id = r.id
+        returning id into v_new;
+        v_loc := array(select id from public.locations where country = r.countries[i]);
+        update public.stock     set product_id = v_new where product_id = r.id and location_id = any (v_loc);
+        update public.handouts  set product_id = v_new where product_id = r.id and location_id = any (v_loc);
+        update public.stock_log set product_id = v_new where product_id = r.id and location_id = any (v_loc);
+        update public.returns   set product_id = v_new where product_id = r.id and location_id = any (v_loc);
+        update public.transfers set product_id = v_new where product_id = r.id and from_location_id = any (v_loc);
+      end loop;
+    end loop;
+    update public.products
+    set country = coalesce((select country from public.locations group by country order by count(*) desc, country limit 1), 'DK')
+    where country is null;
+  end if;
+end $$;
+
 -- PPE given back by a worker (e.g. when leaving). to_stock = put back into stock as returned PPE.
 create table if not exists public.returns (
   id                bigint generated always as identity primary key,
@@ -379,6 +420,21 @@ create trigger stock_log_trigger
 
 -- ---------- stock functions (each call is one all-or-nothing transaction) ----------
 
+-- A product can only be stocked / handed out in its own country.
+create or replace function public.check_product_country(p_product_id bigint, p_location_id bigint)
+returns void
+language plpgsql stable set search_path = public
+as $$
+declare
+  v_pc text := (select country from products where id = p_product_id);
+  v_lc text := (select country from locations where id = p_location_id);
+begin
+  if v_pc is not null and v_lc is not null and v_pc <> v_lc then
+    raise exception '% is a product for % and cannot be used at %.',
+      (select title from products where id = p_product_id), v_pc, (select title from locations where id = p_location_id);
+  end if;
+end $$;
+
 -- Changes a stock quantity by p_delta. p_returned_delta changes the returned (used) part of it:
 -- negative when handing out returned PPE, positive when a worker returns PPE into stock.
 -- The returned part can never be more than the total.
@@ -393,6 +449,7 @@ declare
   v_qty integer;
   v_ret integer;
 begin
+  perform check_product_country(p_product_id, p_location_id);
   insert into stock (product_id, size, location_id, quantity)
   values (p_product_id, p_size, p_location_id, 0)
   on conflict (product_id, size, location_id) do nothing;
@@ -433,6 +490,7 @@ language plpgsql set search_path = public
 as $$
 begin
   if not can_operate(p_location_id) then raise exception 'You can only change stock at your own location'; end if;
+  perform check_product_country(p_product_id, p_location_id);
   perform ppe_context('Manual edit', p_note);
   insert into stock (product_id, size, location_id, quantity, returned_quantity)
   values (p_product_id, p_size, p_location_id, p_quantity, greatest(0, least(coalesce(p_returned, 0), p_quantity)))
@@ -720,6 +778,8 @@ $$;
 
 -- Only signed-in users may call the functions (row level security still applies inside them).
 revoke execute on function public.ppe_context(text, text) from public, anon;
+revoke execute on function public.check_product_country(bigint, bigint) from public, anon;
+grant execute on function public.check_product_country(bigint, bigint) to authenticated;
 revoke execute on function public.is_admin() from public, anon;
 revoke execute on function public.can_operate(bigint) from public, anon;
 revoke execute on function public.in_my_country(bigint) from public, anon;

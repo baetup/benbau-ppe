@@ -1,6 +1,6 @@
 // Demo data store with the same interface as SupabaseDb, kept in localStorage.
 // The stock operations mirror the database functions in supabase/setup.sql.
-const KEY = 'ppe-demo-db-v11';
+const KEY = 'ppe-demo-db-v12';
 
 export class DemoDb {
   constructor(user) {
@@ -93,6 +93,7 @@ export class DemoDb {
 
   async setStock(productId, size, locationId, quantity, note, returned) {
     this.mustOperate(locationId, 'You can only change stock at your own location');
+    this.checkProductCountry(productId, locationId);
     return this.transaction(() => {
       this.ctx = { source: 'Manual edit', note };
       const row = this.stockRow(productId, size, locationId);
@@ -405,7 +406,14 @@ export class DemoDb {
     return row;
   }
 
+  // Mirror of check_product_country in setup.sql.
+  checkProductCountry(productId, locationId) {
+    const p = this.find('products', productId), l = this.find('locations', locationId);
+    if (p && l && p.Country && l.Country && p.Country !== l.Country) throw new Error(`${p.Title} is a product for ${p.Country} and cannot be used at ${l.Title}.`);
+  }
+
   adjust(productId, size, locationId, delta, allowNegative, returnedDelta = 0) {
+    this.checkProductCountry(productId, locationId);
     const row = this.stockRow(productId, size, locationId);
     const label = `${this.find('products', productId).Title} (${size}) at ${this.find('locations', locationId).Title}`;
     if (!allowNegative && row.Quantity + delta < 0) throw new Error(`Not enough stock of ${label}. Available: ${row.Quantity}.`);
@@ -490,7 +498,7 @@ function seed() {
   const clothes = 'S, M, L, XL, 2XL, 3XL, 4XL';
   const boots = '38, 39, 40, 41, 42, 43, 44, 45, 46, 47';
   const gloves = '7, 8, 9, 10, 11';
-  const products = [
+  const productDefs = [
     ['Winter Jacket', clothes, 'Jacket'], ['Softshell Jacket', clothes, 'Jacket'],
     ['Winter Trousers', clothes, 'Trousers'], ['Summer Work Trousers', clothes, 'Trousers'],
     ['Hi-Vis Vest', 'S, M, L, XL, 2XL, 3XL', 'Vest'],
@@ -502,15 +510,20 @@ function seed() {
     ['Ear Plugs (box)', 'OneSize', '', 'consumable'], ['Ear Defenders', 'OneSize', '', 'consumable'],
     ['Knee Pads', 'OneSize', '', 'consumable'], ['FFP2 Masks (box)', 'OneSize', '', 'consumable'],
     ['Disposable Coveralls', 'M, L, XL, 2XL', '', 'consumable'],
-  ].map(([Title, Sizes, SizeType, Category = 'regular']) => add('products', {
-    Title, Sizes, SizeType, Category, Returnable: Category === 'regular', ImageUrl: '', Active: true,
-  }));
-  const P = title => products.find(p => p.Title === title);
+  ];
+  // Every country has its own products (different standards). Sweden uses a few different items.
+  const swedish = { 'Safety Helmet White': 'Safety Helmet Yellow (SS-EN 397)', 'Hi-Vis Vest': 'Hi-Vis Vest Class 2 (SE)', 'Winter Safety Boots': 'Winter Safety Boots S3 SRC' };
+  const products = ['DK', 'SE'].flatMap(Country => productDefs.map(([title, Sizes, SizeType, Category = 'regular']) => add('products', {
+    Title: Country === 'SE' && swedish[title] ? swedish[title] : title, Sizes, SizeType, Category,
+    Returnable: Category === 'regular', ImageUrl: '', Active: true, Country, base: title,
+  })));
+  // PC(base title, country) -> that country's version of the product.
+  const PC = (title, country) => products.find(p => p.base === title && p.Country === country);
   const sizesOf = p => p.Sizes.split(',').map(s => s.trim());
 
   // ----- stock at every location, with the initial count in the stock log -----
   for (const loc of locs) {
-    for (const p of products) {
+    for (const p of products.filter(x => x.Country === loc.Country)) {
       for (const size of sizesOf(p)) {
         const r = rnd();
         if (r < 0.08) continue;                                      // never stocked here
@@ -577,6 +590,8 @@ function seed() {
     }
   };
   for (const person of people) {
+    const country = locs.find(l => l.id === person.LocationId).Country;
+    const P = title => PC(title, country);   // products of the worker's country
     const start = person.startedDaysAgo;
     const winter = rnd() < 0.7;
     handout(person, [
@@ -613,6 +628,7 @@ function seed() {
     }
   }
   for (const p of people) delete p.startedDaysAgo;
+  for (const p of products) delete p.base;
 
   // ----- stock log for the last 3 months: handouts + weekly consumable counts (drives the Orders suggestions) -----
   for (const hnd of t.handouts) {
@@ -624,7 +640,7 @@ function seed() {
     });
   }
   for (const p of products.filter(x => x.Category === 'consumable')) {
-    for (const loc of locs) {
+    for (const loc of locs.filter(l => l.Country === p.Country)) {
       for (const size of sizesOf(p)) {
         for (let w = 12; w >= 1; w--) {
           const used = Math.floor(rnd() * (p.Title.includes('box') ? 6 : 4));
@@ -644,7 +660,7 @@ function seed() {
     const group = rnd() < 0.5 ? dk : se;
     const from = pick(group);
     const to = pick(group.filter(l => l !== from));
-    const p = pick(products);
+    const p = pick(products.filter(x => x.Country === from.Country));
     const size = pick(sizesOf(p));
     const qty = 1 + Math.floor(rnd() * 5);
     const date = iso(now - Math.floor(rnd() * 90) * day);

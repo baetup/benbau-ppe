@@ -241,7 +241,7 @@ const rep = { kind: 'lost', country: null, company: 'all', open: new Set() };
 
 export function outstandingView(ctx) {
   const { svc, state, COUNTRIES } = ctx;
-  if (!rep.country || !COUNTRIES.some(c => c.code === rep.country)) rep.country = state.country;
+  if (!rep.country || !COUNTRIES.some(c => c.code === rep.country) || rep.header !== state.country) { rep.country = state.country; rep.header = state.country; }
   const wrap = h('div', { class: 'outstanding' });
   const body = h('div');
   let data = [];

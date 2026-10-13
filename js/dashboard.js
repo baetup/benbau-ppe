@@ -15,7 +15,8 @@ const dash = { country: null, locationId: 'all', period: '365', problemsOnly: fa
 // ctx: { svc, state, COUNTRIES, countryName, periodRange, lowStock, showHandoutHistory(productId, filters) }
 export function dashboardView(ctx) {
   const { svc, state, COUNTRIES } = ctx;
-  if (dash.country === null) dash.country = state.country;
+  // Follow the header's country switch (the Country filter here can still be changed afterwards).
+  if (dash.country === null || dash.header !== state.country) { dash.country = state.country; dash.locationId = 'all'; dash.header = state.country; }
 
   const filters = h('div', { class: 'dash-filters' });
   const body = h('div', { class: 'dash-body' }, h('div', { class: 'loading' }, h('div', { class: 'spinner' }), 'Loading dashboard…'));
@@ -70,7 +71,7 @@ export function dashboardView(ctx) {
   }
 
   function render(stats, stock, locs, range, bucket) {
-    const products = svc.activeProducts();
+    const products = svc.productsIn(dash.country, { activeOnly: true });
     const low = ctx.lowStock;
 
     // ----- stock figures for the locations in scope -----
@@ -196,7 +197,8 @@ export function dashboardView(ctx) {
               h('span', { class: 'cell-num' }, c.carried ? c.total.toLocaleString() : '—'),
               c.out ? statusBadge('critical', String(c.out)) : c.low ? statusBadge('warning', String(c.low)) : null));
           });
-          return h('tr', null, h('th', { scope: 'row' }, p.Title), tds, h('td', { class: 'row-total' }, rowTotal.toLocaleString()));
+          const label = dash.country === 'all' ? `${p.Title} (${svc.productCountry(p)})` : p.Title;
+          return h('tr', null, h('th', { scope: 'row' }, label), tds, h('td', { class: 'row-total' }, rowTotal.toLocaleString()));
         })));
       return h('div', { class: 'matrix-scroll' }, table);
     }

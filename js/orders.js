@@ -49,7 +49,8 @@ export function ordersView(ctx) {
       p.Active !== false && p.LocationId === ord.locationId &&
       (ord.includeRotation || !p.InRotation) &&
       (ord.company === 'all' || (p.Company || '').trim() === ord.company));
-    const products = svc.activeProducts().filter(p => svc.categoryOf(p) === ord.category);
+    const country = svc.countryOf(svc.location(ord.locationId));
+    const products = svc.productsIn(country, { activeOnly: true }).filter(p => svc.categoryOf(p) === ord.category);
     // Months of history actually available (the stock log may be younger than the chosen period).
     const months = usage.first ? Math.min(cfg.historyMonths, Math.max(0.25, (Date.now() - usage.first.getTime()) / (30.44 * 86400000))) : 0;
     const csv = [];

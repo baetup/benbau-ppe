@@ -20,6 +20,11 @@ export class PpeService {
   person(id) { return this.personnel.find(x => x.id === id); }
   activeLocations() { return this.locations.filter(x => x.Active !== false); }
   activeProducts() { return this.products.filter(x => x.Active !== false); }
+  // Products belong to one country (different products / standards per country). 'all' or empty = every country.
+  productCountry(p) { return (p && p.Country) || this.defaultCountry; }
+  productsIn(country, { activeOnly = false } = {}) {
+    return this.products.filter(p => (!activeOnly || p.Active !== false) && (!country || country === 'all' || this.productCountry(p) === country));
+  }
   activePersonnel() { return this.personnel.filter(x => x.Active !== false); }
 
   // Countries: a location's Country column; locations without one belong to the default country.
