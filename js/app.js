@@ -918,8 +918,27 @@ function openProductEditor(product, newCategory = 'regular') {
       !canProd || !canStock ? h('div', { class: 'note' }, !canProd && canStock
         ? 'You can change the stock here. Product details can only be changed by a lead or admin.'
         : !canStock ? `Stock at ${svc.locName(locId)} can only be changed by its officer, a lead or an admin.` : '') : null),
-    footer: canProd || canStock ? h('button', { class: 'btn btn-block btn-brand', onclick: save }, icon('check'), 'Save') : null,
+    footer: !(canProd || canStock) ? null : h('div', { class: 'footer-row' },
+      !isNew && canProd ? h('button', { class: 'btn btn-outline c-red', onclick: remove }, icon('trash'), 'Delete') : null,
+      h('button', { class: 'btn btn-brand grow', onclick: save }, icon('check'), 'Save')),
   });
+
+  async function remove() {
+    const ok = await confirmDialog(h('div', { class: 'stack' },
+      h('p', null, h('b', null, product.Title), ` (${countryName(svc.productCountry(product))}) will be deleted, together with its stock at every location.`),
+      h('p', { class: 'muted small' }, 'Handouts, returns and the stock history keep the product name, so past records stay readable. This cannot be undone. To keep the product but stop using it, untick "Active" instead.')),
+      { title: 'Delete product', okText: 'Delete product', danger: true });
+    if (!ok) return;
+    const r = await busy('Deleting…', () => svc.deleteProduct(product));
+    if (r === FAILED) return;
+    m.close();
+    state.cart = state.cart.filter(c => c.productId !== product.id);
+    savePrefs();
+    updateCartBadge();
+    toast(`${product.Title} deleted`, 'success');
+    state.stockLoc = null;
+    renderView();
+  }
 
   async function save() {
     if (!name.value.trim()) return toast('Product name is required', 'error');

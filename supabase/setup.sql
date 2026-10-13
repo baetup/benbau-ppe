@@ -360,11 +360,34 @@ create policy "admins manage staff" on public.staff
 do $$
 declare t text;
 begin
-  foreach t in array array['locations', 'products', 'stock', 'personnel', 'handouts', 'transfers', 'incidents', 'returns'] loop
+  foreach t in array array['locations', 'stock', 'personnel', 'handouts', 'transfers', 'incidents', 'returns'] loop
     execute format('drop policy if exists "staff full access" on public.%I', t);
     execute format('create policy "staff full access" on public.%I for all to authenticated using (public.is_staff()) with check (public.is_staff())', t);
   end loop;
 end $$;
+
+-- Products: every staff member can read them; only admins (any country) and leads (their own country)
+-- can create, change or delete them. Officers change stock through set_stock, not the products table.
+create or replace function public.can_manage_product(p_country text)
+returns boolean
+language sql stable security definer set search_path = public
+as $$
+  select exists (
+    select 1 from public.staff
+    where lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+      and (role = 'admin' or (role = 'lead' and (p_country is null or p_country = country)))
+  );
+$$;
+drop policy if exists "staff full access" on public.products;
+drop policy if exists "staff read products" on public.products;
+drop policy if exists "leads add products" on public.products;
+drop policy if exists "leads change products" on public.products;
+drop policy if exists "leads delete products" on public.products;
+create policy "staff read products" on public.products for select to authenticated using (public.is_staff());
+create policy "leads add products" on public.products for insert to authenticated with check (public.can_manage_product(country));
+create policy "leads change products" on public.products for update to authenticated
+  using (public.can_manage_product(country)) with check (public.can_manage_product(country));
+create policy "leads delete products" on public.products for delete to authenticated using (public.can_manage_product(country));
 
 -- ---------- evidence files (private storage bucket, staff only) ----------
 insert into storage.buckets (id, name, public, file_size_limit)
@@ -778,6 +801,8 @@ $$;
 
 -- Only signed-in users may call the functions (row level security still applies inside them).
 revoke execute on function public.ppe_context(text, text) from public, anon;
+revoke execute on function public.can_manage_product(text) from public, anon;
+grant execute on function public.can_manage_product(text) to authenticated;
 revoke execute on function public.check_product_country(bigint, bigint) from public, anon;
 grant execute on function public.check_product_country(bigint, bigint) to authenticated;
 revoke execute on function public.is_admin() from public, anon;

@@ -47,6 +47,13 @@ export class DemoDb {
 
   async remove(table, id) {
     await tick();
+    if (table === 'products') {
+      // Like the database: only admins and leads (own country); stock goes with the product, history keeps the name.
+      const p = this.find('products', id);
+      if (this.user.role === 'officer' || (this.user.role === 'lead' && p && p.Country !== this.user.country)) throw new Error('Only a lead or an admin can delete products');
+      this.data.tables.stock = this.rows('stock').filter(s => s.ProductId !== id);
+      for (const t of ['handouts', 'returns', 'transfers', 'stock_log']) for (const r of this.rows(t)) if (r.ProductId === id) r.ProductId = null;
+    }
     this.data.tables[table] = this.rows(table).filter(r => r.id !== id);
     write(this.data);
   }

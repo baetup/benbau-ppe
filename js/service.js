@@ -41,6 +41,11 @@ export class PpeService {
   // ---------- master data ----------
   saveLocation(data) { return this.save('locations', this.locations, data); }
   saveProduct(data) { return this.save('products', this.products, data); }
+  // Deletes the product and its stock everywhere; handouts, returns and the stock log keep the product name.
+  async deleteProduct(p) {
+    await this.db.remove('products', p.id);
+    this.products = this.products.filter(x => x.id !== p.id);
+  }
   savePerson(data) { return this.save('personnel', this.personnel, data); }
 
   async save(table, cache, data) {

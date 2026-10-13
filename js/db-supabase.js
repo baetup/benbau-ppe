@@ -36,7 +36,10 @@ export class SupabaseDb {
   }
 
   async remove(table, id) {
-    check(await this.sb.from(TABLES[table]).delete().eq('id', id));
+    // When the database's security rules don't allow a delete, nothing is deleted and no error is
+    // returned, so check that the row was really removed.
+    const rows = check(await this.sb.from(TABLES[table]).delete().eq('id', id).select('id'));
+    if (!rows || !rows.length) throw new Error('Could not delete: it may already be gone, or you do not have permission.');
   }
 
   async setStock(productId, size, locationId, quantity, note, returned) {

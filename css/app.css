@@ -184,6 +184,8 @@ select.input {
 .check-row { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
 .check-row input { width: 20px; height: 20px; accent-color: var(--brand); flex: none; }
 
+.footer-row { display: flex; gap: 10px; }
+.footer-row .btn { height: 48px; }
 .suggest-wrap { position: relative; }
 .suggest-list {
   position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 20; max-height: 220px; overflow-y: auto;
