@@ -2,7 +2,7 @@
 // While supabaseUrl / supabaseKey are empty the app runs in DEMO mode (sample data stored only in your browser).
 window.PPE_CONFIG = {
   // Supabase > Project Settings > Data API (or "Connect") > Project URL, e.g. "https://abcdefgh.supabase.co"
-  supabaseUrl: "hhttps://kkgbepadlszzaskctmys.supabase.co",
+  supabaseUrl: "https://kkgbepadlszzaskctmys.supabase.co",
 
   // Supabase > Project Settings > API Keys > the "publishable" key (sb_publishable_...) or the legacy "anon public" key.
   // This key is meant to be public. NEVER put the "secret" / "service_role" key here.
