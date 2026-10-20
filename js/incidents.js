@@ -361,8 +361,13 @@ export function openIncidentForm(ctx, existing, { person: presetPerson, onSaved 
       Status: status.value, FollowUp: followUp.value.trim(),
       ClosedAt: status.value === 'Closed' ? (closing ? new Date().toISOString() : x.ClosedAt) : null,
       ClosedBy: status.value === 'Closed' ? (closing ? svc.user.name : x.ClosedBy) : null,
-      Signature: sig && !sig.isEmpty() ? sig.toDataURL() : (x.Signature || ''),
     };
+    // A signature only confirms the facts it was given for: when they change, the old signature is dropped
+    // (the audit log keeps a fingerprint of it) unless the worker signs again.
+    const factsChanged = !isNew && ['PersonnelId', 'IncidentDate', 'LocationId', 'Type', 'Description', 'ActionTaken', 'BreachCount']
+      .some(k => String(fields[k] ?? '') !== String(x[k] ?? ''));
+    fields.Signature = sig && !sig.isEmpty() ? sig.toDataURL() : (factsChanged ? '' : (x.Signature || ''));
+    if (factsChanged && x.Signature && sig && sig.isEmpty()) toast('The details changed, so the old signature was removed. Ask the worker to sign again.', 'info', 6000);
     if (isNew) Object.assign(fields, { CreatedBy: svc.user.name, CreatedByEmail: svc.user.email, Evidence: [] });
 
     const r = await busy(added.length ? 'Saving and uploading evidence…' : 'Saving…', async () => {

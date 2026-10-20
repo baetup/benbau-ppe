@@ -223,12 +223,12 @@ export class PpeService {
     return this.db.recentHandouts(personId, [...new Set(productIds)], since.toISOString());
   }
 
-  exchangeHandout(h, newSize, quantity, locationId) {
-    return this.db.exchangeHandout(h.id, newSize, quantity, locationId);
+  exchangeHandout(h, newSize, quantity, locationId, signature) {
+    return this.db.exchangeHandout(h.id, newSize, quantity, locationId, signature);
   }
 
-  deleteHandout(h, returnToStock) {
-    return this.db.deleteHandout(h.id, returnToStock);
+  deleteHandout(h, returnToStock, reason) {
+    return this.db.deleteHandout(h.id, returnToStock, reason);
   }
 
   transfer({ fromId, toId, items, reason }) {

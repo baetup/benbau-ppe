@@ -30,6 +30,8 @@ export class DemoDb {
 
   async create(table, fields) {
     await tick();
+    if (table === 'personnel') this.checkWorkerSite(fields.LocationId);
+    if (table === 'locations' && this.user.role !== 'admin') throw new Error('Only an admin can manage locations');
     const row = { ...clean(fields), id: ++this.data.nextId };
     this.rows(table).push(row);
     write(this.data);
@@ -40,6 +42,11 @@ export class DemoDb {
     await tick();
     const row = this.find(table, id);
     if (!row) throw new Error('Item not found');
+    if (table === 'personnel') {
+      if (this.user.role !== 'admin' && !this.inMyCountry(row.LocationId)) throw new Error('You can only change workers in your own country');
+      this.checkWorkerSite('LocationId' in fields ? fields.LocationId : row.LocationId);
+    }
+    if (table === 'locations' && this.user.role !== 'admin') throw new Error('Only an admin can manage locations');
     Object.assign(row, clean(fields));
     write(this.data);
     return clone(row);
@@ -51,6 +58,10 @@ export class DemoDb {
       // Like the database: only admins and leads (own country); stock goes with the product, history keeps the name.
       const p = this.find('products', id);
       if (this.user.role === 'officer' || (this.user.role === 'lead' && p && p.Country !== this.user.country)) throw new Error('Only a lead or an admin can delete products');
+      // Like the database trigger: the removed stock is written to the stock log as "Product deleted".
+      this.ctx = { source: 'Product deleted', note: `${p ? p.Title : 'Product'} deleted` };
+      for (const s of this.rows('stock').filter(x => x.ProductId === id)) this.setQuantity(s, 0);
+      this.ctx = null;
       this.data.tables.stock = this.rows('stock').filter(s => s.ProductId !== id);
       for (const t of ['handouts', 'returns', 'transfers', 'stock_log']) for (const r of this.rows(t)) if (r.ProductId === id) r.ProductId = null;
     }
@@ -74,6 +85,32 @@ export class DemoDb {
 
   mustOperate(locationId, message) {
     if (!this.canOperate(locationId)) throw new Error(message);
+  }
+
+  // Mirror of in_my_country in setup.sql.
+  inMyCountry(locationId) {
+    const loc = this.find('locations', locationId);
+    if (!loc) return false;
+    return this.user.role === 'admin' || loc.Country === this.user.country;
+  }
+
+  countryOf(locationId) { return (this.find('locations', locationId) || {}).Country; }
+
+  // Every worker needs a site, in a country the user works in (mirror of the personnel policies).
+  checkWorkerSite(locationId) {
+    if (!locationId) throw new Error('Choose the worker\'s site');
+    if (!this.inMyCountry(locationId)) throw new Error('You can only add or change workers in your own country');
+  }
+
+  // Keeps a replaced or deleted signature (mirror of signature_history).
+  archiveSignature(h, event) {
+    if (!h.Signature) return;
+    this.rows('signature_history').push({
+      id: ++this.data.nextId, ArchivedAt: new Date().toISOString(), Event: event, HandoutId: h.id, BatchId: h.BatchId,
+      PersonnelId: h.PersonnelId, PersonnelName: h.PersonnelName, Title: h.Title, Size: h.Size, Quantity: h.Quantity,
+      LocationId: h.LocationId, LocationName: h.LocationName, SignedOn: h.HandoutDate, Signature: h.Signature,
+      ArchivedBy: this.user.name, ArchivedByEmail: this.user.email,
+    });
   }
 
   async listStaff() { await tick(); return clone(this.rows('staff')).sort((a, b) => a.Name.localeCompare(b.Name)); }
@@ -104,8 +141,15 @@ export class DemoDb {
     return this.transaction(() => {
       this.ctx = { source: 'Manual edit', note };
       const row = this.stockRow(productId, size, locationId);
+      const oldRet = row.ReturnedQuantity || 0;
+      const sameQty = row.Quantity === quantity;
       this.setQuantity(row, quantity);
-      row.ReturnedQuantity = Math.max(0, Math.min(returned == null ? (row.ReturnedQuantity || 0) : returned, row.Quantity));
+      row.ReturnedQuantity = Math.max(0, Math.min(returned == null ? oldRet : returned, row.Quantity));
+      // Like the database trigger: a change of only the returned (used) part is logged too.
+      if (sameQty && row.ReturnedQuantity !== oldRet) {
+        this.ctx = { source: 'Manual edit', note: [note, `returned (used) part ${oldRet} → ${row.ReturnedQuantity}`].filter(Boolean).join(' · ') };
+        this.logStock(row, row.Quantity, row.Quantity);
+      }
     });
   }
 
@@ -118,6 +162,9 @@ export class DemoDb {
         if (!(it.qty > 0)) continue;
         const h = this.find('handouts', it.handoutId);
         if (!h || h.PersonnelId !== personId) throw new Error('Handout not found for this worker');
+        // Mirror of record_return: only handouts from your own country, received in that same country.
+        if (!this.inMyCountry(h.LocationId)) throw new Error('You can only record returns for PPE handed out in your own country');
+        if (this.countryOf(h.LocationId) !== loc.Country) throw new Error(`${h.Title} (${h.Size}) was handed out in another country and cannot be returned at ${loc.Title}`);
         const open = h.Quantity - (h.ReturnedQuantity || 0);
         if (it.qty > open) throw new Error(`${h.Title} (${h.Size}): only ${open} not yet returned`);
         h.ReturnedQuantity = (h.ReturnedQuantity || 0) + it.qty;
@@ -194,6 +241,11 @@ export class DemoDb {
       const person = this.find('personnel', personId);
       const loc = this.find('locations', locationId);
       if (!person) throw new Error('Person not found');
+      // Mirror of create_handout: the worker must have a site in the user's country, in the same country.
+      if (!person.LocationId) throw new Error(`${person.Title} has no site. Set the worker's site first (Personnel → Edit).`);
+      if (!this.inMyCountry(person.LocationId)) throw new Error('You can only hand out PPE to workers in your own country');
+      if (this.countryOf(person.LocationId) !== loc.Country) throw new Error(`${person.Title} belongs to a site in another country.`);
+      if (!signature) throw new Error('The receiver needs to sign');
       this.ctx = { source: 'Handout', note: `To ${person.Title}` };
       const batchId = `demo-${Date.now()}`;
       return items.map(it => {
@@ -354,38 +406,49 @@ export class DemoDb {
     return clone(this.rows('handouts').filter(h => h.BatchId === batchId));
   }
 
-  async exchangeHandout(id, newSize, quantity, locationId) {
+  // Mirror of exchange_handout: the worker signs again for the new size.
+  async exchangeHandout(id, newSize, quantity, locationId, signature) {
     this.mustOperate(locationId, 'You can only exchange sizes at your own location');
     return this.transaction(() => {
       const h = this.find('handouts', id);
       if (!h) throw new Error('Handout not found');
+      if (!this.inMyCountry(h.LocationId)) throw new Error('You can only exchange handouts made in your own country');
       if (!newSize || newSize === h.Size) throw new Error('Choose a different size');
       const open = h.Quantity - (h.ReturnedQuantity || 0);
       if (!(quantity >= 1 && quantity <= open)) throw new Error(`Quantity must be between 1 and ${open} (items already returned cannot be exchanged)`);
+      if (!signature) throw new Error('The worker needs to sign for the new size');
       const loc = this.find('locations', locationId);
       this.ctx = { source: 'Size exchange', note: `${h.PersonnelName}: ${h.Size} → ${newSize}` };
       this.adjust(h.ProductId, newSize, locationId, -quantity, false);
       this.adjust(h.ProductId, h.Size, locationId, quantity, true);
-      const note = `Size exchanged ${h.Size} → ${newSize} (${quantity} pcs) at ${loc.Title} on ${new Date().toISOString().slice(0, 10)} by ${this.user.name}`;
-      const notes = [h.Notes, note].filter(Boolean).join('\n');
+      const note = `Size exchanged ${h.Size} → ${newSize} (${quantity} pcs) at ${loc.Title} on ${new Date().toISOString().slice(0, 10)} by ${this.user.name}, signed by the worker`;
       if (quantity === h.Quantity) {
-        Object.assign(h, { Size: newSize, Notes: notes });
+        this.archiveSignature(h, 'Replaced by size exchange');
+        Object.assign(h, { Size: newSize, Signature: signature, Notes: [h.Notes, note].filter(Boolean).join('\n') });
       } else {
         h.Quantity -= quantity;
         h.FromReturned = Math.min(h.FromReturned || 0, h.Quantity);
-        this.rows('handouts').push({ ...h, id: ++this.data.nextId, Size: newSize, Quantity: quantity, Notes: notes, ReturnedQuantity: 0, FromReturned: 0 });
+        this.rows('handouts').push({
+          ...h, id: ++this.data.nextId, BatchId: `demo-${Date.now()}`, Size: newSize, Quantity: quantity,
+          LocationId: loc.id, LocationName: loc.Title, Reason: 'Size Change', Notes: note, HandoutDate: new Date().toISOString(),
+          HandedOutBy: this.user.name, HandedOutByEmail: this.user.email, Signature: signature, ReturnedQuantity: 0, FromReturned: 0,
+        });
       }
     });
   }
 
-  async deleteHandout(id, returnToStock) {
+  // Mirror of delete_handout: a reason is stored in the stock log; the signature is kept.
+  async deleteHandout(id, returnToStock, reason) {
     return this.transaction(() => {
       const h = this.find('handouts', id);
       if (!h) return;
       if (h.LocationId) this.mustOperate(h.LocationId, 'You can only change handouts made at your own location');
-      this.ctx = { source: 'Handout deleted', note: `Returned from ${h.PersonnelName || 'unknown'}` };
+      else if (this.user.role !== 'admin') throw new Error('Only an admin can delete handouts of a deleted location');
+      const why = (reason || '').trim() || 'No reason provided by client';
+      this.ctx = { source: 'Handout deleted', note: `Returned from ${h.PersonnelName || 'unknown'} — reason: ${why}` };
       const open = h.Quantity - (h.ReturnedQuantity || 0);
       if (returnToStock && h.LocationId && h.ProductId && open > 0) this.adjust(h.ProductId, h.Size, h.LocationId, open, true, Math.min(h.FromReturned || 0, open));
+      this.archiveSignature(h, 'Handout deleted');
       this.data.tables.handouts = this.rows('handouts').filter(r => r.id !== id);
     });
   }
@@ -435,6 +498,10 @@ export class DemoDb {
     const old = row.Quantity;
     if (old === quantity) return;
     row.Quantity = quantity;
+    this.logStock(row, old, quantity);
+  }
+
+  logStock(row, old, quantity) {
     const ctx = this.ctx || {};
     this.rows('stock_log').push({
       id: ++this.data.nextId, ChangedAt: new Date().toISOString(),

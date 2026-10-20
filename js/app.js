@@ -1397,17 +1397,21 @@ function openHandoutActions(x) {
       }
     }
     drawSizes();
+    // The worker signs again for the new size.
+    const sig = createSignaturePad();
     exchange = h('div', { class: 'form' },
       field('New size', sizeSel),
       open > 1 ? field(`Quantity to exchange (max ${open})`, qty) : null,
       field('Exchange at', locSel),
       h('div', { class: 'muted small' }, `Size ${x.Size} goes back into stock and the new size is taken from stock at this location.`),
+      field(`${x.PersonnelName || 'Worker'} signs for the new size *`, sig.el),
       h('button', {
         class: 'btn btn-block btn-brand', onclick: async () => {
           const n = open > 1 ? parseInt(qty.value, 10) : 1;
           if (!(n >= 1 && n <= open)) return toast(`Quantity must be between 1 and ${open}`, 'error');
           if (!otherSizes.includes(sizeSel.value)) return toast('Choose the new size', 'error');
-          const r = await busy('Exchanging…', () => svc.exchangeHandout(x, sizeSel.value, n, Number(locSel.value)));
+          if (sig.isEmpty()) return toast('The worker needs to sign for the new size', 'error');
+          const r = await busy('Exchanging…', () => svc.exchangeHandout(x, sizeSel.value, n, Number(locSel.value), sig.toDataURL()));
           if (r === FAILED) return;
           m.close();
           state.stockLoc = null;
@@ -1418,7 +1422,7 @@ function openHandoutActions(x) {
   }
 
   const m = openModal({
-    title: 'Change handout', iconName: 'edit', iconClass: 'c-brand',
+    title: 'Change handout', iconName: 'edit', iconClass: 'c-brand', persistent: true,
     body: h('div', { class: 'stack' },
       h('div', { class: 'items-summary' },
         h('b', null, `${x.Quantity} × ${x.Title} — size ${x.Size}`),
@@ -1441,19 +1445,35 @@ function showSignature(x) {
   });
 }
 
-async function deleteHandout(x) {
+const DELETE_REASONS = ['Handed out by mistake', 'Wrong worker selected', 'Wrong product or quantity', 'Duplicate entry', 'Worker did not take the PPE'];
+
+// Deleting a handout needs a reason; it is saved in the stock history and the audit log.
+function deleteHandout(x) {
   const canReturn = x.LocationId && svc.location(x.LocationId);
-  const res = await confirmDialog(`Delete the handout record for ${x.Quantity} × ${x.Title} (${x.Size})?`, {
-    title: 'Delete handout', okText: 'Delete', danger: true,
-    checkbox: canReturn ? `Return ${x.Quantity} to stock at ${x.LocationName}` : null,
+  const open = x.Quantity - (x.ReturnedQuantity || 0);
+  const reason = h('input', { class: 'input', placeholder: 'Why is this handout deleted?' });
+  const back = h('input', { type: 'checkbox', checked: true });
+  const m = openModal({
+    title: 'Delete handout', iconName: 'trash', iconClass: 'c-red', size: 'sm', persistent: true,
+    body: h('div', { class: 'form' },
+      h('p', { class: 'confirm-text' }, `Delete the handout record for ${x.Quantity} × ${x.Title} (${x.Size}) — ${x.PersonnelName || ''}?`),
+      field('Reason *', suggestInput(reason, DELETE_REASONS)),
+      canReturn && open > 0 ? h('label', { class: 'check-row' }, back, `Return ${open} to stock at ${x.LocationName}`) : null,
+      h('div', { class: 'muted small' }, 'The deletion, the reason and the signature are kept in the history.')),
+    footer: h('div', { class: 'btn-row' },
+      h('button', { class: 'btn btn-outline', onclick: () => m.close() }, 'Cancel'),
+      h('button', { class: 'btn btn-red', onclick: async () => {
+        if (!reason.value.trim()) return toast('Write a reason for deleting this handout', 'error');
+        const toStock = !!(canReturn && open > 0 && back.checked);
+        const r = await busy('Deleting…', () => svc.deleteHandout(x, toStock, reason.value.trim()));
+        if (r === FAILED) return;
+        m.close();
+        state.handouts = state.handouts.filter(y => y.id !== x.id);
+        if (toStock) state.stockLoc = null;
+        fillHandouts();
+        toast('Handout deleted', 'success');
+      } }, icon('trash'), 'Delete')),
   });
-  if (!res) return;
-  const r = await busy('Deleting…', () => svc.deleteHandout(x, res.checked));
-  if (r === FAILED) return;
-  state.handouts = state.handouts.filter(y => y.id !== x.id);
-  if (res.checked) state.stockLoc = null;
-  fillHandouts();
-  toast('Handout deleted', 'success');
 }
 
 // Receipt for one handout batch, downloadable as an image (with signature).
@@ -1488,7 +1508,7 @@ const HIST_SORTS = [
   ['date-desc', 'Newest first'], ['date-asc', 'Oldest first'], ['person-asc', 'Person A–Z'],
   ['product-asc', 'Equipment A–Z'], ['location-asc', 'Location A–Z'],
 ];
-const STOCK_SOURCES = ['Manual edit', 'Handout', 'Return', 'Transfer', 'Handout deleted', 'Size exchange', 'Database edit', 'Other'];
+const STOCK_SOURCES = ['Manual edit', 'Handout', 'Return', 'Transfer', 'Handout deleted', 'Size exchange', 'Product deleted', 'Location deleted', 'Deleted', 'Database edit', 'Other'];
 const STOCK_REASONS = ['Delivery received', 'Stock count correction', 'Damaged / discarded', 'Initial stock count', 'Returned by worker'];
 const HIST_DEFAULTS = {
   locationId: 'all', productId: 'all', period: 'month', from: '', to: '',
@@ -1810,8 +1830,10 @@ function openPersonEditor(person) {
     const companies = [...new Set([svc.mainCompany, ...(cfg.branches || []), ...svc.personnel.map(x => (x.Company || '').trim()).filter(Boolean)])];
     const company = h('input', { class: 'input', value: p.Company || (isNew ? svc.mainCompany : ''), placeholder: 'Choose or type a company' });
     const empNo = h('input', { class: 'input', value: p.EmployeeNo || '' });
+    // Every worker needs a site in a country the user works in (the database checks this too).
+    const siteChoices = svc.locations.filter(l => COUNTRIES.some(c => c.code === svc.countryOf(l)) && (l.Active !== false || l.id === p.LocationId));
     const loc = h('select', { class: 'input', value: p.LocationId ? String(p.LocationId) : '' },
-      h('option', { value: '' }, '—'), locationOptions(svc.locations));
+      h('option', { value: '' }, 'Choose the site…'), locationOptions(siteChoices));
     const status = h('select', { class: 'input' },
       h('option', { value: 'active' }, 'On site / active'), h('option', { value: 'rotation' }, 'In rotation (subcontractors only)'), h('option', { value: 'left' }, 'Left'));
     status.value = svc.statusOf(p);
@@ -1827,7 +1849,7 @@ function openPersonEditor(person) {
         field('Phone', phone),
         field('Company', suggestInput(company, companies)),
         field('Employee no.', empNo),
-        field('Site / location', loc),
+        field('Site / location *', loc),
         field('Status', status),
         h('div', { class: 'field' },
           h('span', { class: 'field-label' }, 'Sizes'),
@@ -1837,6 +1859,7 @@ function openPersonEditor(person) {
           if (!name.value.trim()) return toast('Name is required', 'error');
           if (email.value.trim() && !/^\S+@\S+\.\S+$/.test(email.value.trim())) return toast('Email address looks wrong', 'error');
           const lid = loc.value ? Number(loc.value) : null;
+          if (!lid) return toast('Choose the worker\'s site', 'error');
           if (status.value === 'rotation' && svc.isMainCompany(company.value)) return toast(`Rotation is only for subcontractors, not ${svc.mainCompany}`, 'error');
           const statusChanged = status.value !== svc.statusOf(p);
           const r = await busy('Saving…', () => svc.savePerson({

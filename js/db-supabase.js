@@ -195,12 +195,13 @@ export class SupabaseDb {
     return check(await this.sb.from('handouts').select('*').eq('batch_id', batchId).order('id')).map(fromDb);
   }
 
-  async exchangeHandout(id, newSize, quantity, locationId) {
-    check(await this.sb.rpc('exchange_handout', { p_id: id, p_new_size: newSize, p_quantity: quantity, p_location_id: locationId }));
+  // The worker signs again for the new size (signature = PNG/JPEG data URL).
+  async exchangeHandout(id, newSize, quantity, locationId, signature) {
+    check(await this.sb.rpc('exchange_handout', { p_id: id, p_new_size: newSize, p_quantity: quantity, p_location_id: locationId, p_signature: signature }));
   }
 
-  async deleteHandout(id, returnToStock) {
-    check(await this.sb.rpc('delete_handout', { p_id: id, p_return_to_stock: !!returnToStock }));
+  async deleteHandout(id, returnToStock, reason) {
+    check(await this.sb.rpc('delete_handout', { p_id: id, p_return_to_stock: !!returnToStock, p_reason: reason || null }));
   }
 }
 

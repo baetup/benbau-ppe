@@ -13,7 +13,7 @@ window.PPE_CONFIG = {
 
   // Demo with sample data at <address>?demo. false = "?demo" is ignored on the website (people get the
   // normal login screen). On your own PC (http://localhost) the demo always works for testing.
-  demoEnabled: true,
+  demoEnabled: false,
 
   // Countries the app covers. Each location belongs to one of these (set in Menu > Manage locations).
   // The first one is the default. Add more lines to add more countries.
